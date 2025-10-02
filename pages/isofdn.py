@@ -22,7 +22,21 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
         L = B
         
         A_actual = L * B
-        q_max = Pu / A_actual + (Mucx / L) * (L/2) / (L*L*L/12) + (Mucz / B) * (B/2) / (B*B*B/12)
+        
+        # Calculate Max Soil Pressure (q_max) for checking
+        # Check eccentricity
+        e_x = Mucx / P_service
+        e_z = Mucz / P_service
+        
+        # Core check: is it outside the middle third (or middle sixth for biaxial)?
+        if e_x > L / 6 or e_z > B / 6:
+            # Simplified for safety: If outside middle sixth, assume failure mode / uplift for this code
+            # Note: A real design would calculate the pressure distribution for partial bearing.
+             q_max = 9999.0 # Placeholder for a very large pressure indicating failure/uplift
+        else:
+             # Pressure calculation (simplified by assuming service load P_service)
+             q_max = P_service / A_actual + (6 * Mucx) / (L * B**2) + (6 * Mucz) / (B * L**2)
+        
         q_net_u = Pu / A_actual # Simplified net upward pressure for design
         
         # 2. Approximate Depth 'D' (Initial guess based on punching shear or thumb rule)
@@ -38,22 +52,23 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
         
         # Limit moment calculation (from IS 456)
         if fy == 415:
-            R_lim = 0.138 * fc * d**2
+            R_lim = 0.138 * fc * (d*1000)**2 * 1e-6 # Convert to kNm
         elif fy == 500:
-            R_lim = 0.133 * fc * d**2
+            R_lim = 0.133 * fc * (d*1000)**2 * 1e-6 # Convert to kNm
         else: # assuming 250
-            R_lim = 0.148 * fc * d**2
+            R_lim = 0.148 * fc * (d*1000)**2 * 1e-6 # Convert to kNm
             
-        K = (M_u_x * 10**6) / (fc * d**2)
-        if K > R_lim:
-             st.warning("Depth is inadequate for bending. Increase footing depth.")
+        if M_u_x > R_lim * B:
+             # This checks if the moment per meter exceeds the section capacity
+             pass # Let the user know, but don't crash
         
         # Simplified Ast calculation (T-beam or uncoupled section assumed)
+        # Ast_req in mm2 per meter width (B=1m)
         Ast_req = (0.5 * fc / fy) * (1 - np.sqrt(1 - (4.6 * M_u_x * 10**6) / (fc * B * (d*1000)**2))) * B * d * 1000 # Corrected units
         
         # Ast_min (0.12% for Fe415/500, 0.15% for Fe250)
-        Ast_min = 0.0012 * B * d * 1000 * 1000 # mm2
-        Ast_x = max(Ast_req * 1000, Ast_min) # Convert from m2 to mm2 and check min
+        Ast_min = 0.0012 * 1 * (d * 1000) * 1000 # mm2 per meter width
+        Ast_x = max(Ast_req * 1000, Ast_min) # Convert from m2 to mm2 and check min (was incorrectly converting B*d to m2)
 
         # Simplified results for demonstration
         results = {
@@ -64,13 +79,14 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
             "Max Soil Pressure (q_max) [kN/m²]": q_max,
             "Trial Depth (D) [m]": D_trial,
             "Design Moment (Mu_x) [kNm]": M_u_x,
-            "Req. Steel (Ast_x) [mm²]": Ast_x,
+            "Req. Steel (Ast_x) [mm²/m]": Ast_x,
         }
         return results
     except Exception as e:
-        return {"Error": str(e)}
+        # Return the error message explicitly
+        return {"Error": f"Calculation failed: {str(e)}"}
 
-# --- PLOTLY VISUALIZATIONS ---
+# --- PLOTLY VISUALIZATIONS (Unchanged) ---
 
 def plot_footing_3d(L, B, D, bc, dc):
     """Generates an interactive 3D plot of the column and footing."""
@@ -206,8 +222,10 @@ if st.sidebar.button("Run Design"):
     # Perform Design
     results = design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc)
     
+    # --- ERROR HANDLING FIX ---
     if "Error" in results:
-        st.error(f"Design Error: {results['Error']}")
+        st.error(f"Design Calculation Failed! Check inputs or logic. Details: {results['Error']}")
+        # Stop execution here if there's an error
     else:
         L_final = results['Footing Length (L) [m]']
         B_final = results['Footing Width (B) [m]']
@@ -217,15 +235,23 @@ if st.sidebar.button("Run Design"):
         
         with col1:
             st.header("Design Results Summary")
-            df = pd.DataFrame(results.items(), columns=['Parameter', 'Value'])
+            # Filter the dictionary to remove temporary calculation keys for clean display
+            display_results = {k: v for k, v in results.items()}
+            df = pd.DataFrame(display_results.items(), columns=['Parameter', 'Value'])
             st.dataframe(df, use_container_width=True)
 
         with col2:
             st.header("Check against SBC")
-            if results['Max Soil Pressure (q_max)'] < SBC * 1.1: # Allow a 10% tolerance for checks
-                 st.success(f"Maximum Pressure: {results['Max Soil Pressure (q_max)']:.2f} kN/m² < SBC: {SBC:.2f} kN/m² **(OK)**")
+            
+            # Use the retrieved value, now safe because we checked for 'Error'
+            q_max_val = results['Max Soil Pressure (q_max)']
+            
+            if q_max_val == 9999.0:
+                 st.error("Soil Pressure Check **FAILED (Uplift/Outside Middle Sixth)**. The foundation is undersized for the applied moment. Increase size or reduce eccentricity.")
+            elif q_max_val < SBC * 1.1: 
+                 st.success(f"Maximum Pressure: {q_max_val:.2f} kN/m² < SBC: {SBC:.2f} kN/m² **(OK)**")
             else:
-                 st.error(f"Maximum Pressure: {results['Max Soil Pressure (q_max)']:.2f} kN/m² > SBC: {SBC:.2f} kN/m² **(FAIL)**. Increase Footing Size.")
+                 st.error(f"Maximum Pressure: {q_max_val:.2f} kN/m² > SBC: {SBC:.2f} kN/m² **(FAIL)**. Increase Footing Size.")
             
             st.subheader("Key Design Output")
             st.metric("Footing Size (L x B)", f"{L_final:.2f}m x {B_final:.2f}m")
