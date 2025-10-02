@@ -12,8 +12,8 @@ def calculate_base_pressure(Pu, Mz, Mx, L, B):
     """Calculates the pressure at the four corners of the footing."""
     
     # Calculate section modulus
-    I_y = (B * L**3) / 12  # Moment of inertia about Z-axis (for Mx/ey eccentricity)
-    I_x = (L * B**3) / 12  # Moment of inertia about X-axis (for Mz/ex eccentricity)
+    I_y = (B * L**3) / 12  # Moment of inertia about Z-axis (for Mz/ex eccentricity)
+    I_x = (L * B**3) / 12  # Moment of inertia about X-axis (for Mx/ey eccentricity)
     
     A = L * B
     
@@ -64,8 +64,7 @@ def get_ast_required(Mu, fck, fy, d, B):
     Mu_lim = k * fck * B_mm * d_mm**2 / 1e6 # kNm (Used for check only)
         
     if Mu > Mu_lim:
-        # Beam is over-reinforced or section depth is insufficient
-        return 0 # Indicate failure
+        return 0 
     
     # Ast formula from IS 456:2000, Annex G
     Ast_req = (0.5 * fck / fy) * B_mm * d_mm * (1 - math.sqrt(1 - (4.6 * Mu_Nmm) / (fck * B_mm * d_mm**2)))
@@ -117,16 +116,9 @@ def process_and_design(df_staad, L, B, D, fck, fy, sbc_gross, sbc_gross_seismic,
         Pu_unfactored = P1_Fy + P2_Fy + sw_surcharge
         
         # Calculate moments about the CoG of the footing (L/2, B/2)
-        # Assuming pedestals are centered along the width (B/2) and spaced C_C_Distance along the length (L)
-        # x-coordinate of P1/P2 from footing center: +/- C_C_Distance / 2.0
         x_off = C_C_Distance / 2.0
         
-        # Total Moment about X-axis (causes pressure variation along B)
-        # Mx_total = M_x(P1) + M_x(P2) + F_y(P1) * y_off + F_y(P2) * y_off (y_off = 0 if centered along width B)
         Mx_total_unfactored = P1_Mx + P2_Mx
-        
-        # Total Moment about Z-axis (causes pressure variation along L)
-        # Mz_total = M_z(P1) + M_z(P2) + F_y(P1) * (-x_off) + F_y(P2) * (+x_off)
         Mz_total_unfactored = P1_Mz + P2_Mz + P1_Fy * (-x_off) + P2_Fy * (x_off)
         
         # Base Pressure Check
@@ -144,51 +136,41 @@ def process_and_design(df_staad, L, B, D, fck, fy, sbc_gross, sbc_gross_seismic,
         P1u_Fy = P1_Fy * fact_f
         P2u_Fy = P2_Fy * fact_f
         
-        # Recalculate factored moments about the footing CoG (for net pressure calculation)
         Pu_factored_col = P1u_Fy + P2u_Fy
         Mx_total_factored = P1_Mx * fact_f + P2_Mx * fact_f
         Mz_total_factored = P1_Mz * fact_f + P2_Mz * fact_f + P1u_Fy * (-x_off) + P2u_Fy * (x_off)
         
-        # Net Upward Pressure (factored column loads minus self-weight/surcharge)
-        # Pressure used for structural design
         q_net_u_pressures = calculate_base_pressure(Pu_factored_col, Mz_total_factored, Mx_total_factored, L, B)
-        q_net_u_max = q_net_u_pressures['q_max'] - (sw_surcharge / (L*B)) # Deduct average self-weight from gross factored pressure
+        q_net_u_max = q_net_u_pressures['q_max'] - (sw_surcharge / (L*B))
         
         # Moment and Shear Calculation (Long Direction - Along L)
-        # Max Hogging Moment (between columns)
-        # Simplified as a beam supported by soil pressure and loaded by Pu1, Pu2
         Mu_hog = (P1u_Fy * x_off) - (P2u_Fy * x_off) 
-        
-        # Max Sagging Moment (Cantilever)
-        # Critical distance for cantilever: x_cant = (L - C_C_Distance) / 2
         x_cant = (L - C_C_Distance) / 2.0
         q_cant = q_net_u_max
         Mu_sag = (q_cant * B) * (x_cant**2 / 2)
         
         Mu_max = max(abs(Mu_hog), abs(Mu_sag))
         
-        # Required Steel Area (Longitudinal - Lengthwise)
-        Ast_L = get_ast_required(Mu_max, fck, fy, d_m, B) # Ast in mm^2/m
+        Ast_L = get_ast_required(Mu_max, fck, fy, d_m, B)
         
         # Punching Shear Check
-        col_w, col_l = w_pedestal[1]/1000, l_pedestal[1]/1000 # Pedestal dimensions in meters
-        
-        bo = 2 * ((col_w + d_m) + (col_l + d_m)) # Critical perimeter in meters
-        
+        col_w, col_l = w_pedestal[1]/1000, l_pedestal[1]/1000
+        bo = 2 * ((col_w + d_m) + (col_l + d_m))
         Vu_punch = P2u_Fy - (q_net_u_max * (col_w + d_m) * (col_l + d_m))
+        tau_v = (Vu_punch * 1000) / (bo * 1000 * d_m * 1000)
         
-        tau_v = (Vu_punch * 1000) / (bo * 1000 * d_m * 1000) # N/mm2
-        
-        # Allowable shear stress (tau_c')
-        tau_c_prime = 0.25 * math.sqrt(fck) # Max allowable as per IS 456
-        tau_c_prime = min(tau_c_prime, 1.25) # Max allowable limit
-        
+        tau_c_prime = 0.25 * math.sqrt(fck)
+        tau_c_prime = min(tau_c_prime, 1.25)
         punch_check = "SAFE" if tau_v <= tau_c_prime else "UNSAFE"
         
         
-        # Store results
+        # Store results (CORRECTION APPLIED HERE)
         df_results.loc[index, 'L/C'] = lc_name
         df_results.loc[index, 'Factored'] = fact_f
+        # --- MISSING COLUMNS RE-ADDED ---
+        df_results.loc[index, 'Pu_unfactored (kN)'] = Pu_unfactored
+        df_results.loc[index, 'Mz_unfactored (kNm)'] = Mz_total_unfactored
+        # -------------------------------
         df_results.loc[index, 'q_max (kN/m2)'] = q_max
         df_results.loc[index, 'Allow_SBC (kN/m2)'] = allowable_sbc
         df_results.loc[index, 'SBC_CHECK'] = sbc_check
@@ -211,10 +193,8 @@ def app():
 
     st.title("🏗️ Combined Foundation Design for Eccentric Pedestals")
     
-    # --- Sidebar for Design Inputs (from DESIGN.csv) ---
+    # --- Sidebar for Design Inputs ---
     st.sidebar.header("📐 Foundation Geometry & Materials")
-    
-    # Default values based on WORK.csv and DESIGN.csv
     L = st.sidebar.number_input("Footing Length L (m)", value=3.0, min_value=1.0, step=0.1)
     B = st.sidebar.number_input("Footing Width B (m)", value=3.0, min_value=1.0, step=0.1)
     D_mm = st.sidebar.number_input("Footing Overall Depth D (mm)", value=500, min_value=300, step=50)
@@ -249,14 +229,12 @@ def app():
     if uploaded_file is not None:
         try:
             # --- REWIRED FILE PARSING LOGIC ---
-            
             uploaded_data = uploaded_file.getvalue().decode("utf-8")
             data_io = StringIO(uploaded_data)
             
             lines = data_io.readlines()
             header_row_index = -1
             
-            # Find the row containing the detailed headers
             for i, line in enumerate(lines):
                 if 'L/C' in line and 'Fx kN' in line and 'Mx kNm' in line:
                     header_row_index = i
@@ -265,16 +243,10 @@ def app():
             if header_row_index != -1:
                 data_io.seek(0)
                 df_raw = pd.read_csv(data_io, skiprows=header_row_index, header=0, skipinitialspace=True)
-                
-                # Drop rows that are completely NaN and columns that are completely NaN
                 df_raw = df_raw.dropna(axis=0, how='all').dropna(axis=1, how='all')
                 
-                # CORRECTED Column Selection based on inspection:
-                # Column indices (0-based) for: L/C, P1_Fy, P1_Mx, P1_Mz, P2_Fy, P2_Mx, P2_Mz
-                # Indices: [1, 3, 5, 7, 11, 13, 15]
-                
-                # Check if the dataframe has enough columns for iloc
                 if df_raw.shape[1] >= 16: 
+                    # Column indices: [1, 3, 5, 7, 11, 13, 15] for L/C, P1_Fy, P1_Mx, P1_Mz, P2_Fy, P2_Mx, P2_Mz
                     df_staad = df_raw.iloc[:, [1, 3, 5, 7, 11, 13, 15]].copy()
                     df_staad.columns = ['L/C', 'P1_Fy kN', 'P1_Mx kNm', 'P1_Mz kNm', 'P2_Fy kN', 'P2_Mx kNm', 'P2_Mz kNm']
                     
@@ -317,7 +289,6 @@ def app():
         critical_ecc = df_results[df_results['ECC_CHECK'] == 'FAIL']
         critical_punch = df_results[df_results['PUNCH_CHECK'] == 'UNSAFE']
         
-        # ... (Safety check messages as before) ...
         if not critical_sbc.empty or not critical_ecc.empty or not critical_punch.empty:
             st.warning("⚠️ Some checks failed. Review the results and adjust geometry/parameters.")
         else:
@@ -345,11 +316,11 @@ def app():
         
         st.header("📊 Design Visualizations (Plotly Sketches)")
         
+        # This row is now guaranteed to have the necessary columns
         q_plot_row = df_results.loc[df_results['q_max (kN/m2)'].idxmax()]
         
         # --- Sketch 1: Footing and Pedestals Plan View ---
         st.subheader("1. Footing Plan View")
-        # ... (Plotly code for Plan View as before) ...
         
         fig_plan = go.Figure()
         fig_plan.add_shape(type="rect", x0=0, y0=0, x1=L, y1=B, line=dict(color="RoyalBlue", width=2), fillcolor="lightblue", opacity=0.5)
@@ -373,6 +344,7 @@ def app():
         st.subheader("2. Unfactored Base Pressure Distribution (Critical SBC Case)")
         
         x_coords = np.linspace(0, L, 100)
+        # Formula: q = P/A + Mz*cx/Iy. This line is now safe.
         q_pressure_line = q_plot_row['Pu_unfactored (kN)'] / (L*B) + (q_plot_row['Mz_unfactored (kNm)'] * (L/2 - x_coords) / ((B*L**3)/12))
         
         fig_pressure = go.Figure()
