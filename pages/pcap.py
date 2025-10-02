@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import math
+import plotly.graph_objects as go # Import Plotly for visualization
 
 # --- 1. CORE ENGINEERING FUNCTIONS (BS 8110 IMPLEMENTATION) ---
 
@@ -115,7 +116,135 @@ def calculate_pile_reactions(P_total, Mx, My, pile_coords_df):
     
     return reactions_df, Ix_group, Iy_group, max_reaction
 
-# --- 2. STREAMLIT UI LAYOUT & DATA INPUT ---
+# --- 2. PLOTLY DRAWING FUNCTIONS ---
+
+def draw_pile_cap_plan(cap_L, cap_B, column_C, column_A, pile_dia, pile_coords_df):
+    """Generates a Plotly figure for the pile cap plan view."""
+    
+    pile_radius = pile_dia / 2000 # Convert mm to m
+    fig = go.Figure()
+
+    # 1. Draw Pile Cap Boundary (L x B)
+    cap_x = [cap_L/2, cap_L/2, -cap_L/2, -cap_L/2, cap_L/2]
+    cap_y = [cap_B/2, -cap_B/2, -cap_B/2, cap_B/2, cap_B/2]
+    fig.add_trace(go.Scatter(x=cap_x, y=cap_y, 
+                             mode='lines', 
+                             name='Cap Outline',
+                             line=dict(color='gray', width=3)))
+
+    # 2. Draw Column (C x A, centered)
+    col_x_m = column_C / 1000.0
+    col_y_m = column_A / 1000.0
+    col_x = [col_x_m/2, col_x_m/2, -col_x_m/2, -col_x_m/2, col_x_m/2]
+    col_y = [col_y_m/2, -col_y_m/2, -col_y_m/2, col_y_m/2, col_y_m/2]
+    fig.add_trace(go.Scatter(x=col_x, y=col_y, 
+                             mode='lines', 
+                             name='Column',
+                             line=dict(color='blue', width=2, dash='dash')))
+
+    # 3. Draw Piles
+    piles_data = pile_coords_df.copy().reset_index()
+    for _, row in piles_data.iterrows():
+        x_center = row['x_i (m)']
+        y_center = row['y_i (m)']
+        
+        # Draw Pile circle using shape
+        fig.add_shape(type="circle",
+            xref="x", yref="y",
+            x0=x_center - pile_radius, y0=y_center - pile_radius,
+            x1=x_center + pile_radius, y1=y_center + pile_radius,
+            line_color="black",
+            fillcolor="lightgreen",
+            opacity=0.8
+        )
+        
+        # Add label for pile
+        fig.add_annotation(x=x_center, y=y_center,
+                           text=row['Pile'],
+                           showarrow=False,
+                           font=dict(color="black", size=10))
+
+
+    # Set layout properties
+    fig.update_layout(
+        title='Pile Cap Plan View (Looking Down)',
+        xaxis_title='X-Coordinate (m)',
+        yaxis_title='Y-Coordinate (m)',
+        xaxis=dict(range=[-cap_L/2 - 0.2, cap_L/2 + 0.2], scaleanchor="y", scaleratio=1),
+        yaxis=dict(range=[-cap_B/2 - 0.2, cap_B/2 + 0.2]),
+        width=700,
+        height=700,
+        plot_bgcolor='white'
+    )
+    
+    return fig
+
+def draw_pile_cap_section(cap_L, cap_H, column_C, d1, cover):
+    """Generates a Plotly figure for a simplified cross-section view (X-X)."""
+    
+    fig = go.Figure()
+    
+    # Convert mm to m
+    H_m = cap_H / 1000.0
+    C_m = column_C / 1000.0
+    d1_m = d1 / 1000.0
+    cover_m = cover / 1000.0
+    
+    # 1. Cap Rectangle (Profile)
+    fig.add_shape(type="rect",
+        x0=-cap_L/2, y0=-H_m, x1=cap_L/2, y1=0,
+        line=dict(color="gray", width=2),
+        fillcolor="lightgray",
+        opacity=0.7
+    )
+    
+    # 2. Column Rectangle (Above cap)
+    col_height = 0.5 # Assume 0.5m of column showing
+    fig.add_shape(type="rect",
+        x0=-C_m/2, y0=0, x1=C_m/2, y1=col_height,
+        line=dict(color="blue", width=2),
+        fillcolor="lightblue",
+        opacity=0.9
+    )
+    
+    # 3. Effective Depth Line (d1 from top)
+    fig.add_trace(go.Scatter(
+        x=[-cap_L/2 * 0.9, cap_L/2 * 0.9],
+        y=[-d1_m, -d1_m],
+        mode='lines',
+        name='$d_1$ Layer',
+        line=dict(color='red', width=2, dash='dot')
+    ))
+    
+    # 4. Cover Line (for visual reference)
+    fig.add_trace(go.Scatter(
+        x=[-cap_L/2 * 0.9, cap_L/2 * 0.9],
+        y=[-cover_m, -cover_m],
+        mode='lines',
+        name='Cover',
+        line=dict(color='orange', width=1, dash='dash')
+    ))
+    
+    # Annotations
+    fig.add_annotation(x=cap_L/2 + 0.1, y=-H_m/2, text=f"H = {cap_H:.0f} mm", showarrow=False, yshift=0, font=dict(size=12))
+    fig.add_annotation(x=-C_m/2 - 0.05, y=col_height/2, text=f"C = {column_C:.0f} mm", showarrow=False, font=dict(color='blue'))
+    fig.add_annotation(x=0, y=-d1_m - 0.1, text=f"$d_1$ = {d1:.0f} mm", showarrow=False, font=dict(color='red'))
+    
+    # Set layout properties
+    fig.update_layout(
+        title='Simplified Pile Cap Section X-X (Dimensions in meters)',
+        xaxis_title='X-Direction (m)',
+        yaxis_title='Vertical Depth (m)',
+        yaxis=dict(autorange="reversed", range=[-H_m - 0.1, col_height + 0.1]),
+        width=700,
+        height=500,
+        showlegend=False,
+        plot_bgcolor='white'
+    )
+    
+    return fig
+
+# --- 3. STREAMLIT UI LAYOUT & DATA INPUT ---
 
 st.set_page_config(layout="wide", page_title="CID Pile Cap Design (BS 8110)")
 
@@ -203,7 +332,7 @@ with col_layout:
 
 # --- 5. CALCULATION AND OUTPUT ---
 st.markdown("---")
-if st.button("Run Pile Cap Design Checks", use_container_width=True):
+if st.button("Run Pile Cap Design Checks and Generate Drawings", use_container_width=True):
     
     if len(st.session_state.pile_coords) < 1:
         st.error("Please define at least one pile coordinate.")
@@ -231,7 +360,7 @@ if st.button("Run Pile Cap Design Checks", use_container_width=True):
     Pu_design = max(P_ULT1, P_ULT2)
 
     # --- TABBED OUTPUT ---
-    tab1, tab2, tab3 = st.tabs(["Pile Reaction & Capacity", "Flexural Design", "Shear Checks"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Pile Reaction & Capacity", "Flexural Design", "Shear Checks", "Drawings"])
 
     # --- TAB 1: PILE REACTION & CAPACITY ---
     with tab1:
@@ -268,9 +397,6 @@ if st.button("Run Pile Cap Design Checks", use_container_width=True):
         d_x = d1 # Use d1 (largest d)
         
         # For simplicity, critical Mu is taken as the maximum ULS moment here.
-        # In a real sheet, Mu is calculated from pile reactions at the column face.
-        # Mu_x_crit = (Sum of factored pile loads * moment arm 'a') - M_column_face_from_loads 
-        # For this template, we'll use a simplified critical moment:
         Mu_x_design = max(abs(Mx_ULT1), abs(Mx_ULT2))
         
         As_x_req, z_x, status_x = design_bs8110_flexure(Mu_x_design, fcu, fy, b_x, d_x)
@@ -358,3 +484,21 @@ if st.button("Run Pile Cap Design Checks", use_container_width=True):
             st.error("Punching Shear Failure: Increase cap depth (H).")
         else:
             st.success("Punching Shear Check (Simplified): OK")
+            
+    # --- TAB 4: DRAWINGS ---
+    with tab4:
+        st.header("Pile Cap Geometry Drawings")
+        pile_coords_data = edited_df.reset_index()
+        
+        if not pile_coords_data.empty:
+            # Plan View
+            st.subheader("Plan View: Cap, Column, and Pile Arrangement")
+            plan_fig = draw_pile_cap_plan(cap_L, cap_B, column_C, column_A, pile_dia, pile_coords_data)
+            st.plotly_chart(plan_fig, use_container_width=True)
+            
+            # Section View
+            st.subheader("Cross Section (Simplified) along X-axis")
+            section_fig = draw_pile_cap_section(cap_L, cap_H, column_C, d1, cover)
+            st.plotly_chart(section_fig, use_container_width=True)
+        else:
+            st.warning("Please define pile coordinates in the sidebar to generate the drawings.")
