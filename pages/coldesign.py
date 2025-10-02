@@ -310,18 +310,21 @@ with col_mat_load:
     mat_col1, mat_col2 = st.columns(2)
     with mat_col1:
         fc = st.number_input("Concrete Strength, f'c (MPa)", min_value=15.0, value=30.0, step=1.0)
-    with col_mat_load:
+    with mat_col2: # This was incorrectly set to col_mat_load in the last version
         fy = st.number_input("Steel Yield Strength, fy (MPa)", min_value=300.0, value=420.0, step=10.0)
 
     # Loads (Factored)
     st.markdown("#### Factored Design Loads (Pu, Mu)")
     load_col1, load_col2, load_col3 = st.columns(3)
     with load_col1:
-        Pu = st.number_input("Axial Load, Pu (kN)", min_value=0.0, value=1500.0, step=100.0) * 1000 # Convert to N
+        Pu_kN = st.number_input("Axial Load, Pu (kN)", min_value=0.0, value=1500.0, step=100.0)
+        Pu = Pu_kN * 1000 # Convert to N
     with load_col2:
-        Mux = st.number_input("Moment Mu,x (kNm)", min_value=0.0, value=50.0, step=5.0) * 1000000 # Convert to N-mm
+        Mux_kNm = st.number_input("Moment Mu,x (kNm)", min_value=0.0, value=50.0, step=5.0)
+        Mux = Mux_kNm * 1000000 # Convert to N-mm
     with load_col3:
-        Muy = st.number_input("Moment Mu,y (kNm)", min_value=0.0, value=30.0, step=5.0) * 1000000 # Convert to N-mm
+        Muy_kNm = st.number_input("Moment Mu,y (kNm)", min_value=0.0, value=30.0, step=5.0)
+        Muy = Muy_kNm * 1000000 # Convert to N-mm
 
 
 st.markdown("---")
@@ -341,6 +344,14 @@ if st.button("Run Design Check & Visualization", type="primary"):
         
         st.header("3. Detailed Design Procedure & Results")
 
+        # Extract values for cleaner Markdown formatting
+        Phi_Pn_max_kN = results['Phi_Pn_max']
+        Pn_max_kN = results['Pn_max']/1000
+        Pn0_nominal_kN = results['Pn0_nominal']/1000
+        
+        M_req_kNm = np.sqrt(Mux**2 + Muy**2)/1000000
+        Phi_Mn_proxy_kNm = results['Phi_Mn_proxy']/1000000
+        
         # Design Procedure Markdown
         st.markdown(f"""
         ### Design Procedure (Simulated Steps)
@@ -352,17 +363,17 @@ if st.button("Run Design Check & Visualization", type="primary"):
             
         2.  **Pure Axial Capacity ($\boldsymbol{{P_{n0}}}$):** *(Replace with exact code formula)*
             $$P_{n0} = 0.85 f'_c (A_g - A_s) + f_y A_s$$
-            $$P_{n0} = 0.85({{fc}})({{results['Ag']:,}} - {{As_total:,.0f}}) + {{fy}}({{As_total:,.0f}}) = {results['Pn0_nominal']/1000:,.0f} \text{{ kN}}$$
+            $$P_{n0} = 0.85({{fc}})({{results['Ag']:,}} - {{As_total:,.0f}}) + {{fy}}({{As_total:,.0f}}) = {Pn0_nominal_kN:,.0f} \text{{ kN}}$$
 
         3.  **Maximum Factored Axial Capacity ($\boldsymbol{{\phi P_{n,max}}}$):** *(Replace with exact code formula)*
             * Reduction Factor $\phi = 0.65$ (Tied Column)
-            * Max Nominal Capacity $\alpha P_{n0} = 0.80 P_{n0} = {results['Pn_max']/1000:,.0f} \text{{ kN}}$
-            $$\phi P_{n,max} = 0.65 \times {results['Pn_max']/1000:,.0f} \text{{ kN}} = \mathbf{{results['Phi_Pn_max']:.2f} \text{{ kN}}}$$
-            * **Check 1 (Axial):** Required $P_u = {Pu/1000:,.0f} \text{{ kN}}$. Provided $\phi P_{n,max} = {results['Phi_Pn_max']:.2f} \text{{ kN}}$.
+            * Max Nominal Capacity $\alpha P_{n0} = 0.80 P_{n0} = {Pn_max_kN:,.0f} \text{{ kN}}$
+            $$\phi P_{n,max} = 0.65 \times {Pn_max_kN:,.0f} \text{{ kN}} = \mathbf{{Phi_Pn_max_kN:.2f} \text{{ kN}}}$$
+            * **Check 1 (Axial):** Required $P_u = {Pu_kN:,.0f} \text{{ kN}}$. Provided $\phi P_{n,max} = {Phi_Pn_max_kN:.2f} \text{{ kN}}$.
 
         4.  **Biaxial Bending Interaction Check:** *(Placeholder using Simplified Summation)*
-            * Required Resultant Moment $M_u = \sqrt{{M_{ux}^2 + M_{uy}^2}} \approx {np.sqrt(Mux**2 + Muy**2)/1000000:,.1f} \text{{ kNm}}$
-            * Simulated Moment Capacity $\phi M_{n} \approx {results['Phi_Mn_proxy']/1000000:,.1f} \text{{ kNm}}$
+            * Required Resultant Moment $M_u = \sqrt{{M_{ux}^2 + M_{uy}^2}} \approx {M_req_kNm:,.1f} \text{{ kNm}}$
+            * Simulated Moment Capacity $\phi M_{n} \approx {Phi_Mn_proxy_kNm:,.1f} \text{{ kNm}}$
             * **Interaction Ratio (I.R.):** *(The final calculation must come from your P-M diagram/surface analysis)*
             $$ \text{{I.R.}} \approx \frac{{P_u}}{{\phi P_n}} + \frac{{M_u}}{{\phi M_n}} = \mathbf{{results['Interaction_Ratio']:.3f}} $$
             
@@ -420,7 +431,7 @@ if st.button("Run Design Check & Visualization", type="primary"):
             "Parameter": ["Concrete Strength, f'c", "Steel Yield, fy", "Width, b", "Depth, h", "Length, L", "Clear Cover, C", "Bar Diameter, $\phi$", "Total Bars", "Provided $A_s$", "Axial Load, $P_u$", "Moment $M_{u,x}$", "Moment $M_{u,y}$"],
             "Value": [
                 f"{fc} MPa", f"{fy} MPa", f"{b} mm", f"{h} mm", f"{L} mm", f"{C} mm", f"{D_bar} mm", 
-                f"{N_total}", f"{As_total:,.0f} mm²", f"{Pu/1000:,.0f} kN", f"{Mux/1000000:,.0f} kNm", f"{Muy/1000000:,.0f} kNm"
+                f"{N_total}", f"{As_total:,.0f} mm²", f"{Pu_kN:,.0f} kN", f"{Mux_kNm:,.0f} kNm", f"{Muy_kNm:,.0f} kNm"
             ],
         }
         
