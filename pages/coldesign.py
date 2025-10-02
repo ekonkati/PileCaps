@@ -97,7 +97,8 @@ def draw_column_plan(b, h, C, D_bar, N_b, N_h):
                 x = -b_eff / 2 + i * x_step
                 bar_coords.append((x, y))
         else: # Handle case with 1 bar (center)
-            if N_h == 1: # Only 4 corner bars if N_h is also 1
+            # This case is redundant since N_b minimum is 2 in the UI, but kept for robustness
+            if N_h == 1: 
                  bar_coords.append((-b_eff / 2, y))
                  bar_coords.append((b_eff / 2, y))
 
@@ -218,17 +219,12 @@ def calculate_column_design(b, h, L, fc, fy, Pu, Mux, Muy, As_total, C):
     Phi_Pn_max = phi * Pn_max / 1000 # Convert N to kN
 
     # 5. Check Capacity (Simplified Biaxial Interaction Ratio)
-    # This is a highly simplified proxy for the actual interaction surface check.
-    # Mu_capacity_proxy = 0.1 * Pn_max * np.sqrt(b*h) # N-mm
     
-    # Use the ultimate load and moment (Pu, Mux, Muy) for the ratio
-    # Simulating the interaction check based on the square root of the sum of squares of moment ratios
-    
-    # The interaction ratio calculation must be based on the actual P-M diagram.
-    # For this simulation, we'll use a conservative ratio check:
+    # Required resultant moment
     M_req = np.sqrt(Mux**2 + Muy**2) # Resultant Moment (N-mm)
     
     # Dummy Mn value for interaction ratio calculation (Replace with actual Mn)
+    # This is a highly simplified proxy for the actual interaction surface check.
     Phi_Mn_proxy = 0.15 * Phi_Pn_max * 1000 * (min(b, h) - C) # N-mm (Simplified)
 
     if Phi_Mn_proxy == 0:
@@ -237,7 +233,12 @@ def calculate_column_design(b, h, L, fc, fy, Pu, Mux, Muy, As_total, C):
         # P-M Interaction using Bresler's formula simplified for demonstration
         interaction_ratio = (Pu / (Phi_Pn_max * 1000)) + (M_req / Phi_Mn_proxy)
         
-    # Simple pass/fail based on ratio
+    # --- Simulated As Required (Required Steel Area) ---
+    # Placeholder: Assuming required axial capacity is 90% of Pu + safety factor
+    # This calculation MUST be replaced by your code's real P-M analysis output
+    As_required = (Pu * 1.15) / (0.8 * fy) # Rough estimate in mm^2
+
+    # Simple pass/fail based on interaction ratio
     status = "Pass" if interaction_ratio < 1.0 else "Fail"
     
     return {
@@ -246,6 +247,7 @@ def calculate_column_design(b, h, L, fc, fy, Pu, Mux, Muy, As_total, C):
         "Interaction_Ratio": interaction_ratio,
         "Status": status,
         "Phi_Mn_proxy": Phi_Mn_proxy,
+        "As_required": As_required, # Added As_required
     }
 
 
@@ -279,21 +281,25 @@ with col_geom:
         h = st.number_input("Depth, h (mm)", min_value=100, value=600, step=10)
         C = st.number_input("Clear Cover, C (mm)", min_value=20, value=40, step=5)
 
-    # Reinforcement Arrangement
+    # Reinforcement Arrangement (UPDATED for standard selection)
     st.markdown("#### Reinforcement Arrangement")
     rebar_col1, rebar_col2 = st.columns(2)
+    
+    # Standard Bar Diameters (mm)
+    standard_bar_diameters = [12, 16, 20, 25, 32]
+
     with rebar_col1:
-        D_bar = st.number_input("Bar Diameter, $\phi$ (mm)", min_value=12, value=25, step=1)
-        N_b = st.number_input("Bars along B-face (top/bottom)", min_value=2, value=3, step=1)
+        # User selects the bar diameter
+        D_bar = st.selectbox("Bar Diameter, $\phi$ (mm)", standard_bar_diameters, index=3) # Default to 25mm
+        N_b = st.number_input("Bars along B-face (Top/Bottom)", min_value=2, value=3, step=1)
     with rebar_col2:
-        N_h = st.number_input("Bars along H-face (left/right)", min_value=2, value=4, step=1)
+        N_h = st.number_input("Bars along H-face (Left/Right)", min_value=2, value=4, step=1)
         
-    # Calculate Total Steel Area for Calculation
-    # Note: Corner bars are counted in both N_b and N_h loops, so we subtract them.
+    # Calculate Total Steel Area (As_total = As_provided)
     N_total = 2 * N_b + 2 * (N_h - 2)
     As_bar = math.pi * (D_bar / 2)**2
     As_total = N_total * As_bar
-    st.info(f"Total bars: **{N_total}** (Calculated $A_s$ = **{As_total:.0f} mm²**)")
+    st.info(f"Provided $A_s$ ($A_{{s,prov}}$): **{N_total} $\\times$ $\\phi${D_bar}** bars = **{As_total:.0f} mm²**")
 
 
 with col_mat_load:
@@ -340,36 +346,52 @@ if st.button("Run Design Check & Visualization", type="primary"):
         ### Design Procedure (Simulated Steps)
 
         1.  **Section Properties:**
-            * Gross Area ($A_g$): ${b} \times {h} = {results['Ag']:,} \text{ mm}^2$
+            * Gross Area ($A_g$): ${b} \times {h} = {results['Ag']:,} \text{{ mm}}^2$
             * Steel Ratio ($\rho_g$): $A_s / A_g = {As_total:,.0f} / {results['Ag']:,} = {results['rho_g'] * 100:.2f}\%$
-            * Concrete Modulus of Elasticity ($E_c$): $4700 \sqrt{f'_c} = {results['Ec']:.0f} \text{ MPa}$
+            * Concrete Modulus of Elasticity ($E_c$): $4700 \sqrt{{f'_c}} = {results['Ec']:.0f} \text{{ MPa}}$
             
-        2.  **Pure Axial Capacity ($\boldsymbol{P_{n0}}$):** *(Replace with exact code formula)*
+        2.  **Pure Axial Capacity ($\boldsymbol{{P_{n0}}}$):** *(Replace with exact code formula)*
             $$P_{n0} = 0.85 f'_c (A_g - A_s) + f_y A_s$$
-            $$P_{n0} = 0.85({fc})({results['Ag']:,} - {As_total:,.0f}) + {fy}({As_total:,.0f}) = {results['Pn0_nominal']/1000:,.0f} \text{ kN}$$
+            $$P_{n0} = 0.85({{fc}})({{results['Ag']:,}} - {{As_total:,.0f}}) + {{fy}}({{As_total:,.0f}}) = {results['Pn0_nominal']/1000:,.0f} \text{{ kN}}$$
 
-        3.  **Maximum Factored Axial Capacity ($\boldsymbol{\phi P_{n,max}}$):** *(Replace with exact code formula)*
+        3.  **Maximum Factored Axial Capacity ($\boldsymbol{{\phi P_{n,max}}}$):** *(Replace with exact code formula)*
             * Reduction Factor $\phi = 0.65$ (Tied Column)
-            * Max Nominal Capacity $\alpha P_{n0} = 0.80 P_{n0} = {results['Pn_max']/1000:,.0f} \text{ kN}$
-            $$\phi P_{n,max} = 0.65 \times {results['Pn_max']/1000:,.0f} \text{ kN} = \mathbf{{results['Phi_Pn_max']:.2f} \text{ kN}}$$
-            * **Check 1 (Axial):** Required $P_u = {Pu/1000:,.0f} \text{ kN}$. Provided $\phi P_{n,max} = {results['Phi_Pn_max']:.2f} \text{ kN}$.
+            * Max Nominal Capacity $\alpha P_{n0} = 0.80 P_{n0} = {results['Pn_max']/1000:,.0f} \text{{ kN}}$
+            $$\phi P_{n,max} = 0.65 \times {results['Pn_max']/1000:,.0f} \text{{ kN}} = \mathbf{{results['Phi_Pn_max']:.2f} \text{{ kN}}}$$
+            * **Check 1 (Axial):** Required $P_u = {Pu/1000:,.0f} \text{{ kN}}$. Provided $\phi P_{n,max} = {results['Phi_Pn_max']:.2f} \text{{ kN}}$.
 
         4.  **Biaxial Bending Interaction Check:** *(Placeholder using Simplified Summation)*
-            * Required Resultant Moment $M_u = \sqrt{M_{ux}^2 + M_{uy}^2} = \sqrt{({Mux/1000000:,.0f})^2 + ({Muy/1000000:,.0f})^2} \approx {np.sqrt(Mux**2 + Muy**2)/1000000:,.1f} \text{ kNm}$
-            * Simulated Moment Capacity $\phi M_{n} \approx {results['Phi_Mn_proxy']/1000000:,.1f} \text{ kNm}$
+            * Required Resultant Moment $M_u = \sqrt{{M_{ux}^2 + M_{uy}^2}} \approx {np.sqrt(Mux**2 + Muy**2)/1000000:,.1f} \text{{ kNm}}$
+            * Simulated Moment Capacity $\phi M_{n} \approx {results['Phi_Mn_proxy']/1000000:,.1f} \text{{ kNm}}$
             * **Interaction Ratio (I.R.):** *(The final calculation must come from your P-M diagram/surface analysis)*
-            $$ \text{I.R.} \approx \frac{P_u}{\phi P_n} + \frac{M_u}{\phi M_n} = \mathbf{{results['Interaction_Ratio']:.3f}} $$
+            $$ \text{{I.R.}} \approx \frac{{P_u}}{{\phi P_n}} + \frac{{M_u}}{{\phi M_n}} = \mathbf{{results['Interaction_Ratio']:.3f}} $$
             
         ---
-        ## FINAL RESULT:
+        ## FINAL DESIGN OUTPUT & SAFETY CHECK:
         """, unsafe_allow_html=True)
         
         # Display Final Status
         if results['Status'] == "Pass":
-            st.success(f"✅ DESIGN CHECK PASS: Interaction Ratio = {results['Interaction_Ratio']:.3f} (Required < 1.0)")
+            st.success(f"✅ CAPACITY CHECK PASS: Interaction Ratio = {results['Interaction_Ratio']:.3f} (Required < 1.0)")
         else:
-            st.error(f"❌ DESIGN CHECK FAIL: Interaction Ratio = {results['Interaction_Ratio']:.3f} (Required < 1.0). Increase section or reinforcement.")
+            st.error(f"❌ CAPACITY CHECK FAIL: Interaction Ratio = {results['Interaction_Ratio']:.3f} (Required < 1.0). Increase section or reinforcement.")
+        
+        # --- As Required vs As Provided Comparison ---
+        As_required = results['As_required']
+        As_provided = As_total
+        
+        st.markdown(f"""
+        ### Longitudinal Reinforcement Check ($A_s$)
+        
+        * **Required Steel Area ($A_{{s,req}}$):** (Simulated) **{As_required:,.0f} $\text{{ mm}}^2$**
+        * **Provided Steel Area ($A_{{s,prov}}$):** **{As_provided:,.0f} $\text{{ mm}}^2$**
+        """, unsafe_allow_html=True)
 
+        if As_provided >= As_required:
+            st.success(f"✅ REINFORCEMENT PASS: Provided $A_{{s,prov}} = {As_provided:,.0f} \text{{ mm}}^2$ $\ge$ Required $A_{{s,req}} = {As_required:,.0f} \text{{ mm}}^2$.")
+        else:
+            st.warning(f"⚠️ REINFORCEMENT WARNING: Provided $A_{{s,prov}} = {As_provided:,.0f} \text{{ mm}}^2$ $< $ Required $A_{{s,req}} = {As_required:,.0f} \text{{ mm}}^2$. Adjust bar arrangement.")
+        
         
         # --- Visualization Section ---
         st.subheader("4. Column Visualization")
@@ -395,10 +417,10 @@ if st.button("Run Design Check & Visualization", type="primary"):
         """, unsafe_allow_html=True)
 
         data = {
-            "Parameter": ["Concrete Strength, f'c", "Steel Yield, fy", "Width, b", "Depth, h", "Length, L", "Clear Cover, C", "Bar Diameter, $\phi$", "Total Bars", "Axial Load, $P_u$", "Moment $M_{u,x}$", "Moment $M_{u,y}$"],
+            "Parameter": ["Concrete Strength, f'c", "Steel Yield, fy", "Width, b", "Depth, h", "Length, L", "Clear Cover, C", "Bar Diameter, $\phi$", "Total Bars", "Provided $A_s$", "Axial Load, $P_u$", "Moment $M_{u,x}$", "Moment $M_{u,y}$"],
             "Value": [
                 f"{fc} MPa", f"{fy} MPa", f"{b} mm", f"{h} mm", f"{L} mm", f"{C} mm", f"{D_bar} mm", 
-                f"{N_total}", f"{Pu/1000:,.0f} kN", f"{Mux/1000000:,.0f} kNm", f"{Muy/1000000:,.0f} kNm"
+                f"{N_total}", f"{As_total:,.0f} mm²", f"{Pu/1000:,.0f} kN", f"{Mux/1000000:,.0f} kNm", f"{Muy/1000000:,.0f} kNm"
             ],
         }
         
