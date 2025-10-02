@@ -310,7 +310,7 @@ with col_mat_load:
     mat_col1, mat_col2 = st.columns(2)
     with mat_col1:
         fc = st.number_input("Concrete Strength, f'c (MPa)", min_value=15.0, value=30.0, step=1.0)
-    with mat_col2:
+    with col_mat_load:
         fy = st.number_input("Steel Yield Strength, fy (MPa)", min_value=300.0, value=420.0, step=10.0)
 
     # Loads (Factored)
