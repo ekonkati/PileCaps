@@ -313,7 +313,7 @@ def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, H_cap):
 # --- Streamlit Application ---
 
 st.set_page_config(layout="wide", page_title="Pile Group & Cap Design (Metric)")
-st.title("Pile Group Design (Elastic Method)")
+st.title("Pile Group Design Elastic Method")
 st.caption("Calculates maximum pile reaction, performs two-way shear check, and determines flexural steel requirements based on ACI 318-19 (Metric Units: kN, m, MPa).")
 
 # --- Input Section ---
