@@ -10,4 +10,5 @@ shapely
 fpdf2
 plotly
 ezdxf
+scipy
 
