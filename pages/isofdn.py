@@ -2,310 +2,400 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from scipy.optimize import fsolve
 
-# --- ASSUMED DESIGN LOGIC (BASED ON IS 456/STANDARD PRACTICE) ---
-def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
-    """
-    Performs simplified isolated footing design calculations.
-    - Assumes square footing for simplicity in initial sizing.
-    """
-    try:
-        # 1. Calculate Required Area
-        P_service = Pu / 1.5  # Approximate service load (assuming 1.5 load factor)
-        # Assume 0.5m depth for initial self-weight estimation
-        D_assumed = 0.5 
-        W_self = gamma_c * D_assumed # Self weight per m² (assuming 0.5m depth)
-        
-        # Estimate total area required
-        A_req = P_service / (SBC - W_self)
-        if A_req <= 0: A_req = (P_service / SBC) * 1.2 # Fallback
-        
-        # Assume square footing
-        B_req = np.sqrt(A_req)
-        B = np.ceil(B_req * 100) / 100  # Round up to nearest 0.01m
-        L = B
-        
-        A_actual = L * B
-        
-        # 2. Check Soil Pressure and Eccentricity
-        e_x = abs(Mucx / P_service)
-        e_z = abs(Mucz / P_service)
-        
-        if e_x > L / 6 or e_z > B / 6:
-             # Case of uplift / outside middle third (or middle sixth for biaxial)
-             q_max = 9999.0 # Sentinel value for failure
-             pressure_status = "FAILED (Uplift/High Eccentricity)"
-        else:
-             # Pressure calculation (P_service includes self weight calculation refinement)
-             W_footing = gamma_c * L * B * D_assumed # Rough self weight estimate
-             P_total_service = P_service + W_footing
-             
-             q_max = P_total_service / A_actual + (6 * Mucx) / (L * B**2) + (6 * Mucz) / (B * L**2)
-             pressure_status = "OK"
-        
-        # Factored net upward pressure for design
-        q_net_u = Pu / A_actual
-        
-        # 3. Approximate Depth 'D' (Initial guess based on B/3.5)
-        D_trial = B / 3.5
-        d = D_trial - 0.075 # effective depth (m)
-        
-        # 4. Design Bending Moment (Critical section at column face)
-        a_x = (L - bc) / 2
-        M_u_x = q_net_u * B * a_x**2 / 2 # kNm
-        
-        # 5. Required Steel (Ast) per meter width (B=1m)
-        b_m = 1000 # 1 meter width in mm
-        d_m = d * 1000 # effective depth in mm
-        
-        # The term inside the square root (R_term)
-        R_term = (4.6 * M_u_x * 10**6) / (fc * b_m * d_m**2)
+# --- IS 456:2000 DESIGN CONSTANTS ---
 
-        if R_term >= 1.0 or R_term < 0:
-             # Moment capacity exceeded, depth is too shallow
-             Ast_x = 99999.0 # Sentinel value for insufficient depth
-             steel_status = "FAILED (Depth Insufficient)"
-        else:
-             # Calculate Ast (mm2/m)
-             # Equation for Ast from IS 456, solving quadratic equation
-             Ast_req_m2 = (0.5 * fc / fy) * (1 - np.sqrt(1 - R_term)) * b_m * d_m
-             
-             # Ast_min (0.12% for Fe415/500)
-             Ast_min_m2 = 0.0012 * b_m * d_m
-             Ast_x = max(Ast_req_m2, Ast_min_m2)
-             steel_status = "OK"
+# Simplified lookup for Tau_c_max (Table 20, IS 456:2000)
+TAU_C_MAX = {
+    20: 2.8, 25: 3.1, 30: 3.5, 35: 3.7, 40: 4.0
+}
 
-        # RESULTS DICTIONARY (KEYS STANDARDIZED)
-        results = {
-            "Footing Length (L) [m]": L,
-            "Footing Width (B) [m]": B,
-            "Required Area [m²]": A_req,
-            "Actual Area [m²]": A_actual,
-            "Max Soil Pressure (q_max)": q_max, # KEY FIXED
-            "Pressure Status": pressure_status,
-            "Trial Depth (D) [m]": D_trial,
-            "Design Moment (Mu_x) [kNm]": M_u_x,
-            "Req. Steel (Ast_x)": Ast_x, # KEY FIXED
-            "Steel Status": steel_status
-        }
-        return results
+# Simplified lookup for percentage steel pt (Table 19, IS 456:2000)
+# This is a highly simplified interpolation for illustrative purposes
+def get_tau_c(fck, pt):
+    pt = max(0.15, min(pt, 2.0)) # Limit pt between 0.15% and 2.0%
+    if fck == 20:
+        if pt < 0.25: return 0.36
+        if pt < 0.50: return 0.48
+        if pt < 0.75: return 0.56
+        if pt < 1.00: return 0.62
+        return 0.8
+    elif fck == 30:
+        if pt < 0.25: return 0.41
+        if pt < 0.50: return 0.54
+        if pt < 0.75: return 0.63
+        if pt < 1.00: return 0.71
+        return 0.95
+    else: # Default for M25
+        if pt < 0.25: return 0.37
+        if pt < 0.50: return 0.50
+        if pt < 0.75: return 0.57
+        if pt < 1.00: return 0.64
+        return 0.82
+
+# --- CORE ENGINEERING FUNCTIONS ---
+
+def calculate_ast_required(Mu_kNm, B_m, d_m, fc, fy):
+    """Calculates required steel area (Ast) in mm² per meter width."""
+    # Convert Mu to N-mm
+    Mu_Nmm = Mu_kNm * 10**6
+    B_mm = B_m * 1000
+    d_mm = d_m * 1000
+    
+    # Check if moment exceeds section capacity (Mu_limit)
+    if fy == 415:
+        Mu_lim = 0.138 * fc * B_mm * d_mm**2
+    else: # Fe 500
+        Mu_lim = 0.133 * fc * B_mm * d_mm**2
         
-    except Exception as e:
-        # Return the error message explicitly
-        return {"Error": f"Calculation failed during general design step. Detail: {str(e)}"}
+    if Mu_Nmm > Mu_lim:
+        return 99999.0, "FAIL_DEPTH" # Sentinel value for depth failure
 
-# --- PLOTLY VISUALIZATIONS (Unchanged) ---
+    # Calculate R_term (term inside sqrt)
+    R_term = (4.6 * Mu_Nmm) / (fc * B_mm * d_mm**2)
+    
+    if R_term >= 1.0:
+        return 99999.0, "FAIL_MATH" # Math error/impossible design
 
-def plot_footing_3d(L, B, D, bc, dc):
-    """Generates an interactive 3D plot of the column and footing."""
-    # ... (Plotly code remains the same)
-    # 1. Footing (Base)
-    footing = go.Mesh3d(
-        x=[0, L, L, 0, 0, L, L, 0],
-        y=[0, 0, B, B, 0, 0, B, B],
-        z=[-D, -D, -D, -D, 0, 0, 0, 0],
-        colorbar_title='Footing',
-        colorscale='Viridis',
-        opacity=0.6,
-        name='Footing',
-        i = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2],
-        j = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3],
-        k = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
-        flatshading=True,
-        color='lightblue'
-    )
+    # Ast calculation (mm² per meter)
+    Ast_req_m2 = (0.5 * fc / fy) * (1 - np.sqrt(1 - R_term)) * B_mm * d_mm
     
-    # 2. Column (Simplified as a block)
-    col_x_start = L/2 - bc/2
-    col_x_end = L/2 + bc/2
-    col_y_start = B/2 - dc/2
-    col_y_end = B/2 + dc/2
-    col_height = 2*D # Extend column above footing
+    # Ast_min (0.12% for Fe415/500)
+    Ast_min_m2 = 0.0012 * B_mm * d_mm
     
-    col_x = [col_x_start, col_x_end, col_x_end, col_x_start, col_x_start, col_x_end, col_x_end, col_x_start]
-    col_y = [col_y_start, col_y_start, col_y_end, col_y_end, col_y_start, col_y_start, col_y_end, col_y_end]
-    col_z = [0, 0, 0, 0, col_height, col_height, col_height, col_height]
-    
-    column = go.Mesh3d(
-        x=col_x,
-        y=col_y,
-        z=col_z,
-        opacity=0.8,
-        name='Column',
-        i = [7, 0, 0, 0, 4, 4, 6, 6, 4, 0, 3, 2],
-        j = [3, 4, 1, 2, 5, 6, 5, 2, 0, 1, 6, 3],
-        k = [0, 7, 2, 3, 6, 7, 1, 1, 5, 5, 7, 6],
-        flatshading=True,
-        color='gray'
-    )
-    
-    layout = go.Layout(
-        title='3D Isolated Footing Sketch (Plotly)',
-        scene=dict(
-            xaxis=dict(title='Length (m)'),
-            yaxis=dict(title='Width (m)'),
-            zaxis=dict(title='Depth (m)'),
-            aspectmode='data'
-        )
-    )
-    
-    fig = go.Figure(data=[footing, column], layout=layout)
-    return fig
+    Ast_final = max(Ast_req_m2, Ast_min_m2)
+    return Ast_final, "OK"
 
-def plot_footing_plan(L, B, bc, dc):
-    """Generates a 2D plan view showing reinforcement areas."""
+def one_way_shear_check(Pu, q_net_u, L, B, bc, d, fc, Ast_req, Ast_prov):
+    """Performs one-way shear check (critical section at 'd' from column face)."""
     
-    fig = go.Figure()
+    # Critical section from column face
+    a_crit = (L - bc) / 2 - d
     
-    # 1. Footing Outline
-    fig.add_trace(go.Scatter(
-        x=[0, L, L, 0, 0], y=[0, 0, B, B, 0],
-        mode='lines', name='Footing Edge', line=dict(color='black', width=3)
-    ))
-    
-    # 2. Column
-    col_x_start = L/2 - bc/2
-    col_x_end = L/2 + bc/2
-    col_y_start = B/2 - dc/2
-    col_y_end = B/2 + dc/2
-    fig.add_trace(go.Scatter(
-        x=[col_x_start, col_x_end, col_x_end, col_x_start, col_x_start],
-        y=[col_y_start, col_y_start, col_y_end, col_y_end, col_y_start],
-        fill="toself", fillcolor='grey', mode='lines', name='Column'
-    ))
-    
-    # 3. Reinforcement Area (approximate critical section area)
-    # Area for Ast_x (L-direction)
-    fig.add_shape(type="rect",
-        x0=col_x_start, y0=0, x1=col_x_end, y1=B,
-        line=dict(color="red", width=1, dash="dot"),
-        name="Critical Bending Strip (L-Dir)"
-    )
-    
-    # 4. Center Lines
-    fig.add_vline(x=L/2, line_width=1, line_dash="dash", line_color="blue")
-    fig.add_hline(y=B/2, line_width=1, line_dash="dash", line_color="blue")
+    if a_crit <= 0: # Column is wider than footing overhang + d
+        return 0, 0, 0, "OK_DEEP"
 
+    # Shear Force (Vu)
+    Vu = q_net_u * B * a_crit
+    
+    # Nominal Shear Stress (tau_v)
+    tau_v = Vu * 1000 / (B * 1000 * d * 1000) # (N) / (mm * mm) = N/mm2
+    
+    # Permissible Shear Stress (tau_c)
+    # Use provided steel ratio
+    pt_prov = (Ast_prov / (B * 1000 * d * 1000)) * 100 
+    tau_c = get_tau_c(fc, pt_prov)
+    
+    result = "OK" if tau_v < tau_c else "FAIL"
+    
+    return Vu, tau_v, tau_c, result
+
+def punching_shear_check(Pu, q_net_u, L, B, bc, dc, d, fc):
+    """Performs punching shear check (critical section at 'd/2' from column face)."""
+    
+    # Critical perimeter dimensions
+    b_1 = bc + d
+    d_1 = dc + d
+    bo = 2 * (b_1 + d_1)
+    
+    # Area inside the critical perimeter
+    A_crit = b_1 * d_1
+    
+    # Punching Shear Force (Vu_p)
+    Vu_p = Pu - q_net_u * A_crit
+    
+    # Nominal Punching Shear Stress (tau_vp)
+    tau_vp = Vu_p * 1000 / (bo * d * 1000) # (N) / (mm * mm) = N/mm2
+    
+    # Permissible Punching Shear Stress (tau_c_p)
+    beta_c = min(bc, dc) / max(bc, dc)
+    ks = min(0.5 + beta_c, 1.0)
+    tau_c_prime = 0.25 * np.sqrt(fc)
+    
+    tau_c_p = ks * tau_c_prime
+    
+    # Check 1: Tau_vp vs Tau_c_p
+    result_c = "OK" if tau_vp < tau_c_p else "FAIL"
+    
+    # Check 2: Tau_vp vs Tau_c_max
+    tau_c_max = TAU_C_MAX.get(fc, 3.1) # Default M25
+    result_max = "OK" if tau_vp < tau_c_max else "FAIL_MAX"
+    
+    result = "FAIL" if result_c == "FAIL" else result_max if result_max == "FAIL_MAX" else "OK"
+    
+    return Vu_p, tau_vp, tau_c_p, tau_c_max, result
+
+def design_footing_checks(L, B, D, bc, dc, fc, fy, SBC, gamma_c, Pu, P_service, Mucx, Mucz, phi, spacing):
+    """Runs all checks and returns a comprehensive dictionary of results."""
+
+    d = D - 0.075 # Assume 75mm effective cover (0.075m)
+    
+    # 1. Base Pressure Check
+    A_actual = L * B
+    W_footing = gamma_c * L * B * D
+    P_total_service = P_service + W_footing
+    
+    e_x = abs(Mucx / P_service)
+    e_z = abs(Mucz / P_service)
+    
+    if e_x > L / 6 or e_z > B / 6:
+        q_max = 9999.0
+        pressure_status = "FAIL (Uplift/High Eccentricity)"
+    else:
+        q_max = P_total_service / A_actual + (6 * Mucx) / (B * L**2) + (6 * Mucz) / (L * B**2)
+        q_min = P_total_service / A_actual - (6 * Mucx) / (B * L**2) - (6 * Mucz) / (L * B**2)
+        
+        pressure_status = "OK" if q_max < SBC else "FAIL"
+        if q_min < 0:
+             pressure_status = "FAIL (Tension/Uplift)"
+        
+    # 2. Bending Check (Design Moment)
+    q_net_u = Pu / A_actual # Factored net upward pressure
+    
+    # Moment in X-direction (M_u_x, governs Ast_x)
+    a_x = (L - bc) / 2
+    M_u_x = q_net_u * B * a_x**2 / 2 # kNm
+    
+    Ast_req_x, moment_status = calculate_ast_required(M_u_x, B, d, fc, fy)
+    
+    # 3. Provided Steel Calculation
+    As_bar = np.pi * (phi/1000)**2 / 4 # Area of one bar (m²)
+    Ast_prov_x = (B * As_bar) / (spacing/1000) # Provided steel in m² over length L
+    
+    # 4. Shear Checks
+    Vu_1w, tau_v_1w, tau_c_1w, shear_1w_status = one_way_shear_check(Pu, q_net_u, L, B, bc, d, fc, Ast_req_x, Ast_prov_x)
+    
+    Vu_p, tau_v_p, tau_c_p, tau_c_max, shear_p_status = punching_shear_check(Pu, q_net_u, L, B, bc, dc, d, fc)
+    
+    # 5. Final Status
+    final_status = "OK"
+    if pressure_status.startswith("FAIL"): final_status = "FAIL"
+    if moment_status.startswith("FAIL"): final_status = "FAIL"
+    if shear_1w_status.startswith("FAIL"): final_status = "FAIL"
+    if shear_p_status.startswith("FAIL"): final_status = "FAIL"
+
+    # RESULTS DICTIONARY
+    results = {
+        "Footing Length (L) [m]": L,
+        "Footing Width (B) [m]": B,
+        "Trial Depth (D) [m]": D,
+        "Effective Depth (d) [m]": d,
+        "Max Soil Pressure [kN/m²]": q_max,
+        "Pressure Status": pressure_status,
+        "Design Moment (Mu_x) [kNm]": M_u_x,
+        "Req. Steel (Ast_x) [mm²/m]": Ast_req_x if isinstance(Ast_req_x, (int, float)) and Ast_req_x < 99999 else 0,
+        "Moment Status": moment_status,
+        "1W Shear Force (Vu) [kN]": Vu_1w,
+        "1W Shear Stress (τv) [N/mm²]": tau_v_1w,
+        "1W Permissible (τc) [N/mm²]": tau_c_1w,
+        "1W Shear Status": shear_1w_status,
+        "Punching Shear Force (Vup) [kN]": Vu_p,
+        "Punching Shear Stress (τvp) [N/mm²]": tau_v_p,
+        "Punching Permissible (τcp) [N/mm²]": tau_c_p,
+        "Punching Shear Status": shear_p_status,
+        "FINAL_STATUS": final_status
+    }
+    return results
+
+# --- PLOTLY VISUALIZATIONS ---
+
+def plot_base_pressure_diagram(L, B, P_total_service, Mucx, Mucz, SBC):
+    """Creates a 3D surface plot of the soil pressure distribution."""
+    x = np.linspace(0, L, 50)
+    y = np.linspace(0, B, 50)
+    X, Y = np.meshgrid(x, y)
+    
+    # Calculate pressure q(x,y)
+    # Origin (0,0) is assumed at the corner of the footing. Center is (L/2, B/2)
+    # x' = x - L/2, y' = y - B/2 (coordinates relative to centroid)
+    
+    q = (P_total_service / (L * B)) + \
+        (Mucx * (X - L/2)) / (L * B**3 / 12) + \
+        (Mucz * (Y - B/2)) / (B * L**3 / 12)
+        
+    # Clip pressure to zero for tension zones (simple approximation)
+    q[q < 0] = 0
+
+    fig = go.Figure(data=[
+        go.Surface(z=q, x=X, y=Y, colorscale='RdYlGn_r', cmin=0, cmax=SBC * 1.5)
+    ])
+    
     fig.update_layout(
-        title='Footing Plan and Critical Sections',
-        xaxis_title='L (m)',
-        yaxis_title='B (m)',
-        yaxis_scaleanchor="x",
-        yaxis_scaleratio=1
+        title='Soil Base Pressure Diagram (kN/m²)',
+        scene=dict(
+            xaxis_title='Footing Length (m)',
+            yaxis_title='Footing Width (m)',
+            zaxis_title='Pressure (kN/m²)',
+            camera=dict(eye=dict(x=1.5, y=1.5, z=0.5))
+        ),
+        coloraxis_colorbar=dict(title="Pressure (q)")
     )
     return fig
 
 # --- STREAMLIT APP LAYOUT ---
 
 st.set_page_config(layout="wide")
+st.title("🏗️ Isolated Foundation Design | IS 456:2000")
+st.caption("Enhanced design tool with detailed structural checks, rebar selection, and load case management.")
 
-st.title("🏗️ Isolated Foundation Design (IS Code Based)")
-st.caption("Replicating Functionality from 'ISLOATED FOUNDATION DESIGN FOR ALL NODES.xlsm'")
+# Initialize or load load cases dataframe
+default_data = {
+    'Case ID': ['DL+LL', '1.5(DL+LL)'],
+    'P_Service (kN)': [600.0, 900.0],
+    'Mu_x (kNm)': [20.0, 30.0],
+    'Mu_z (kNm)': [15.0, 22.5],
+    'Factor': [1.0, 1.5]
+}
+default_df = pd.DataFrame(default_data)
 
-st.warning("⚠️ **Disclaimer:** This app uses standard IS code logic as a template. To fully replicate your Excel file's functionality, you must ensure the parameters and calculation formulas are consistent with your original spreadsheet.")
-
-st.sidebar.header("Design Inputs")
+st.sidebar.header("1️⃣ Project Inputs")
+st.sidebar.markdown("---")
 
 # Material Properties
-st.sidebar.subheader("Material & Soil Properties")
+st.sidebar.subheader("Material & Soil")
 fc = st.sidebar.selectbox("Concrete Grade (fck) [N/mm²]", options=[20, 25, 30, 35, 40], index=1)
 fy = st.sidebar.selectbox("Steel Grade (fy) [N/mm²]", options=[415, 500], index=0)
-SBC = st.sidebar.number_input("Safe Bearing Capacity (SBC) [kN/m²]", value=200.0, step=10.0)
+SBC = st.sidebar.number_input("Safe Bearing Capacity (SBC) [kN/m²]", value=200.0, step=10.0, min_value=10.0)
 gamma_c = st.sidebar.number_input("Unit Weight of Concrete [kN/m³]", value=25.0, step=1.0)
-
-# Load Data
-st.sidebar.subheader("Column Load Data (Factored)")
-Pu = st.sidebar.number_input("Axial Load (Pu) [kN]", value=800.0, step=50.0)
-Mucx = st.sidebar.number_input("Moment about X-axis (Mucx) [kNm]", value=20.0, step=5.0)
-Mucz = st.sidebar.number_input("Moment about Z-axis (Mucz) [kNm]", value=15.0, step=5.0)
+st.sidebar.markdown("---")
 
 # Column Dimensions
 st.sidebar.subheader("Column Dimensions")
 bc = st.sidebar.number_input("Column Width (bc) [m]", value=0.40, step=0.05)
 dc = st.sidebar.number_input("Column Depth (dc) [m]", value=0.40, step=0.05)
+st.sidebar.markdown("---")
 
+# Foundation Geometry (User Sizing Control)
+st.sidebar.subheader("2️⃣ Footing Sizing")
+L_input = st.sidebar.number_input("Footing Length (L) [m]", value=2.2, step=0.1, min_value=bc)
+B_input = st.sidebar.number_input("Footing Width (B) [m]", value=2.2, step=0.1, min_value=dc)
+D_input = st.sidebar.number_input("Overall Depth (D) [m]", value=0.50, step=0.05, min_value=0.2)
+st.sidebar.markdown("---")
 
-if st.sidebar.button("Run Design"):
-    
-    # Perform Design
-    results = design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc)
-    
-    # --- ERROR HANDLING BLOCK ---
-    if "Error" in results:
-        st.error(f"Design Calculation Failed! Check inputs or logic. Details: {results['Error']}")
-        # The app stops displaying results here if there's a Python error
-    else:
-        # If no "Error" key, we proceed safely
-        L_final = results['Footing Length (L) [m]']
-        B_final = results['Footing Width (B) [m]']
-        D_trial = results['Trial Depth (D) [m]']
+# Reinforcement Selection
+st.sidebar.subheader("3️⃣ Reinforcement Design")
+rebar_phi = st.sidebar.selectbox("Bar Diameter (φ) [mm]", options=[10, 12, 16, 20], index=1)
+rebar_spacing_mm = st.sidebar.number_input("Spacing (s) [mm]", value=150.0, step=10.0, min_value=50.0, max_value=300.0)
 
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.header("Design Results Summary")
-            # Create a dictionary for clean display with units added back
-            display_data = {
-                "Footing Size (L x B)": f"{L_final:.2f}m x {B_final:.2f}m",
-                "Required Area": f"{results['Required Area [m²]']:.2f} m²",
-                "Actual Area": f"{results['Actual Area [m²]']:.2f} m²",
-                "Trial Depth (D)": f"{D_trial:.3f} m",
-                "Design Moment (Mu_x)": f"{results['Design Moment (Mu_x) [kNm]']:.2f} kNm",
-                "Max Soil Pressure": f"{results['Max Soil Pressure (q_max)']:.2f} kN/m²",
-                "Required Steel (Ast, X)": f"{results['Req. Steel (Ast_x)']:.2f} mm²/m"
-            }
-            df = pd.DataFrame(display_data.items(), columns=['Parameter', 'Value'])
-            st.dataframe(df, use_container_width=True)
+# --- LOAD CASE ENTRY ---
+st.subheader("Load Case Entry (Copy/Paste or Direct Edit) 📋")
+st.info("Input **Service Loads** for SBC check and **Factored Loads** for Strength/Shear checks.")
 
-        with col2:
-            st.header("Design Checks")
-            
-            # 1. Soil Pressure Check
-            q_max_val = results['Max Soil Pressure (q_max)']
-            pressure_status = results['Pressure Status']
-            st.subheader("1. Safe Bearing Capacity (SBC) Check")
-            
-            if pressure_status.startswith("FAILED"):
-                 st.error(f"Pressure Check: **{pressure_status}**. The foundation is undersized for the applied moment.")
-            elif q_max_val < SBC * 1.1: 
-                 st.success(f"Maximum Pressure: {q_max_val:.2f} kN/m² < SBC: {SBC:.2f} kN/m² **(OK)**")
-            else:
-                 st.error(f"Maximum Pressure: {q_max_val:.2f} kN/m² > SBC: {SBC:.2f} kN/m² **(FAIL)**. Increase Footing Size.")
-                 
-            # 2. Steel/Depth Check
-            st.subheader("2. Depth and Steel Check")
-            steel_status = results['Steel Status']
-            req_steel = results['Req. Steel (Ast_x)']
-            
-            if steel_status.startswith("FAILED"):
-                st.error(f"Steel Design: **{steel_status}**. The Trial Depth ({D_trial:.2f}m) is too shallow for the bending moment. **Increase depth (D)**.")
-                req_steel_text = "N/A (Depth Fail)"
-            else:
-                st.success("Bending Depth and Steel calculation **(OK)**.")
-                req_steel_text = f"{req_steel:.2f} mm²/m width"
+load_cases_df = st.data_editor(
+    default_df,
+    num_rows="dynamic",
+    column_config={
+        'P_Service (kN)': st.column_config.NumberColumn(format="%.1f", help="Unfactored (Service) Axial Load"),
+        'Mu_x (kNm)': st.column_config.NumberColumn(format="%.2f", help="Unfactored Moment about X-axis"),
+        'Mu_z (kNm)': st.column_config.NumberColumn(format="%.2f", help="Unfactored Moment about Z-axis"),
+        'Factor': st.column_config.NumberColumn(format="%.2f", help="Load Factor (e.g., 1.5 for ultimate checks)"),
+    },
+    key="load_cases_editor"
+)
 
-
-            st.subheader("Key Output")
-            st.metric("Footing Size (L x B)", f"{L_final:.2f}m x {B_final:.2f}m")
-            st.metric("Required Steel (Ast, X-Dir)", req_steel_text)
-
-
-        st.markdown("---")
-        st.header("Design Sketches")
-        
-        # Display sketches only if design size is reasonable (not failed with 9999)
-        if L_final < 100 and B_final < 100:
-            sketch_col1, sketch_col2 = st.columns(2)
-            
-            with sketch_col1:
-                 # 3D Footing Sketch (Plotly)
-                 st.plotly_chart(plot_footing_3d(L_final, B_final, D_trial, bc, dc), use_container_width=True)
-                 
-            with sketch_col2:
-                # Footing Plan Sketch (Plotly)
-                st.plotly_chart(plot_footing_plan(L_final, B_final, bc, dc), use_container_width=True)
-        else:
-             st.error("Footing size is unrealistically large. Check inputs or design logic.")
-             
+if load_cases_df.empty:
+    st.error("Please enter at least one load case.")
 else:
-    st.info("Enter design parameters in the sidebar and click 'Run Design' to generate results and sketches.")
+    # Identify the critical load cases
+    # 1. Critical for Area/SBC (Max P_Service)
+    critical_service_row = load_cases_df.loc[load_cases_df['P_Service (kN)'].idxmax()]
+    P_service_crit = critical_service_row['P_Service (kN)']
+    Mucx_service_crit = critical_service_row['Mu_x (kNm)']
+    Mucz_service_crit = critical_service_row['Mu_z (kNm)']
+    
+    # 2. Critical for Strength (Max Factored Load Pu)
+    load_cases_df['Pu_Factored'] = load_cases_df['P_Service (kN)'] * load_cases_df['Factor']
+    load_cases_df['Mux_Factored'] = load_cases_df['Mu_x (kNm)'] * load_cases_df['Factor']
+    load_cases_df['Muz_Factored'] = load_cases_df['Mu_z (kNm)'] * load_cases_df['Factor']
+    
+    critical_ultimate_row = load_cases_df.loc[load_cases_df['Pu_Factored'].idxmax()]
+    Pu_crit = critical_ultimate_row['Pu_Factored']
+    Mucx_crit = critical_ultimate_row['Mux_Factored']
+    Mucz_crit = critical_ultimate_row['Muz_Factored']
+    
+    # --- RUN DESIGN AND CHECKS ---
+    st.markdown("---")
+    st.header("Design Check Results")
+    
+    # Run design checks using the critical factored loads for strength and service loads for pressure
+    design_results = design_footing_checks(
+        L=L_input, B=B_input, D=D_input, bc=bc, dc=dc, fc=fc, fy=fy, 
+        SBC=SBC, gamma_c=gamma_c, Pu=Pu_crit, P_service=P_service_crit, 
+        Mucx=Mucx_service_crit, Mucz=Mucz_service_crit, 
+        phi=rebar_phi, spacing=rebar_spacing_mm
+    )
+
+    # --- DISPLAY CORE RESULTS ---
+    colA, colB, colC = st.columns(3)
+    
+    with colA:
+        if design_results['FINAL_STATUS'] == "OK":
+            st.success(f"✅ Design Status: {design_results['FINAL_STATUS']}")
+        else:
+            st.error(f"❌ Design Status: {design_results['FINAL_STATUS']}")
+        
+        st.metric("Critical Factored Load (Pu)", f"{Pu_crit:.2f} kN")
+        st.metric("Max Base Pressure (q_max)", f"{design_results['Max Soil Pressure [kN/m²]']:.2f} kN/m²")
+        st.metric("Req. Steel (Ast, X-Dir)", f"{design_results['Req. Steel (Ast_x) [mm²/m]']:.2f} mm²/m")
+
+    with colB:
+        st.subheader("Footing Geometry")
+        st.metric("Footing Size", f"{L_input:.2f} m x {B_input:.2f} m")
+        st.metric("Overall Depth", f"{D_input:.2f} m")
+        st.metric("Effective Depth (d)", f"{design_results['Effective Depth (d) [m]']:.3f} m")
+        
+    with colC:
+        st.subheader("Provided Reinforcement")
+        Ast_req_x_m2 = design_results['Req. Steel (Ast_x) [mm²/m]'] / 1000000 # convert to m²/m
+        
+        # Calculate number of bars
+        As_bar = np.pi * (rebar_phi/1000)**2 / 4 # Area of one bar (m²)
+        N_bars = np.ceil(L_input / (rebar_spacing_mm / 1000))
+        
+        st.metric("Bar Diameter (φ)", f"T{rebar_phi} mm")
+        st.metric("Spacing (s)", f"{rebar_spacing_mm:.0f} mm")
+        st.metric("Provided Bars (Nos)", f"{int(N_bars)} Nos. (over {B_input}m width)")
+        
+        # Check Ast Provided vs Required
+        Ast_prov_x_m2 = (B_input * As_bar) / (rebar_spacing_mm / 1000) # Provided steel in m² over width B
+        Ast_req_total = Ast_req_x_m2 * B_input # Total required steel in m² over width B
+        
+        if Ast_prov_x_m2 > Ast_req_total:
+             st.success(f"Ast Provided ({Ast_prov_x_m2*10000:.2f} cm²/m) > Required ({(Ast_req_total/B_input)*10000:.2f} cm²/m) **(OK)**")
+        else:
+             st.error(f"Ast Provided ({Ast_prov_x_m2*10000:.2f} cm²/m) < Required ({(Ast_req_total/B_input)*10000:.2f} cm²/m) **(FAIL)**")
+
+
+    # --- BASE PRESSURE DIAGRAM ---
+    st.markdown("---")
+    st.header("Base Pressure & Shear Check Diagrams")
+    colD, colE = st.columns([1, 1])
+
+    with colD:
+        st.plotly_chart(plot_base_pressure_diagram(L_input, B_input, P_service_crit, Mucx_service_crit, Mucz_service_crit, SBC), use_container_width=True)
+    
+    with colE:
+        st.subheader("Detailed Structural Checks")
+        
+        st.markdown("##### 1. SBC and Moment Checks")
+        if design_results['Pressure Status'].startswith("FAIL"):
+            st.error(f"SBC Check: **{design_results['Pressure Status']}**. Required Area is larger.")
+        elif design_results['Moment Status'].startswith("FAIL"):
+             st.error(f"Moment Check: **{design_results['Moment Status']}**. D is too shallow.")
+        else:
+             st.success("SBC and Bending Moment Checks **(OK)**")
+
+        st.markdown("##### 2. One-Way Shear Check (Beam Shear)")
+        if design_results['1W Shear Status'].startswith("FAIL"):
+            st.error(f"FAIL: τv ({design_results['1W Shear Stress (τv) [N/mm²]']:.3f}) > τc ({design_results['1W Permissible (τc) [N/mm²]']:.3f})")
+        else:
+            st.success(f"OK: τv ({design_results['1W Shear Stress (τv) [N/mm²]']:.3f}) < τc ({design_results['1W Permissible (τc) [N/mm²]']:.3f})")
+            st.caption(f"Shear Force $V_u$: {design_results['1W Shear Force (Vu) [kN]']:.2f} kN")
+
+        st.markdown("##### 3. Punching Shear Check")
+        if design_results['Punching Shear Status'].startswith("FAIL"):
+            st.error(f"FAIL: τvp ({design_results['Punching Shear Stress (τvp) [N/mm²]']:.3f}) > τcp ({design_results['Punching Permissible (τcp) [N/mm²]']:.3f})")
+        else:
+            st.success(f"OK: τvp ({design_results['Punching Shear Stress (τvp) [N/mm²]']:.3f}) < τcp ({design_results['Punching Permissible (τcp) [N/mm²]']:.3f})")
+            st.caption(f"Shear Force $V_{{up}}$: {design_results['Punching Shear Force (Vup) [kN]']:.2f} kN")
