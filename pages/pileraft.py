@@ -1,9 +1,12 @@
 import streamlit as st
 import numpy as np
+import plotly.graph_objects as go
+import pandas as pd # Used for easily structuring Plotly data
 
 # --- Constants and Setup ---
 # ACI 318-19 Constants (simplified)
 PHI_SHEAR = 0.75  # Strength reduction factor for shear
+PHI_FLEXURE = 0.90 # Strength reduction factor for flexure
 
 def calculate_pile_reactions(P, Mx, My, Nx, Ny, Sx, Sy):
     """
@@ -55,11 +58,11 @@ def calculate_pile_reactions(P, Mx, My, Nx, Ny, Sx, Sy):
     for x, y in pile_coords:
         R_vertical = P / N
         
-        # Moment My causes stress in the x-direction
+        # Moment My causes stress in the x-direction (M*x/Sum(x^2))
         if sum_x2 != 0:
             R_vertical += (My * x) / sum_x2
         
-        # Moment Mx causes stress in the y-direction
+        # Moment Mx causes stress in the y-direction (M*y/Sum(y^2))
         if sum_y2 != 0:
             R_vertical += (Mx * y) / sum_y2
 
@@ -74,16 +77,6 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     """
     Performs the two-way (punching) shear check for the critical pile cap depth.
     ACI 318-19 simplified check.
-
-    Args:
-        R_max (float): Maximum vertical pile reaction (kN).
-        H_cap (float): Pile cap total depth (m).
-        D_pile (float): Pile diameter (m).
-        fc_prime (float): Concrete compressive strength (MPa).
-        LF (float): Load factor for ultimate shear calculation.
-
-    Returns:
-        tuple: (V_u, V_c_allowable, d_eff, check_status)
     """
     
     # Estimate effective depth 'd' (d = H_cap - cover - rebar/2). 
@@ -102,10 +95,10 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     
     # 2. Nominal Concrete Shear Capacity (Vc)
     # ACI 318-19 Eq. 22.6.5.2: Vc = 0.17 * sqrt(f'c) * bo * d (f'c in MPa, bo, d in mm, Vc in N)
-    f_c_psi = fc_prime * 145.038 # Convert MPa to psi
     d_eff_mm = d_eff * 1000 
     b_o_mm = b_o_perimeter * 1000
     
+    # Vc is in Newtons
     V_c_N = 0.17 * np.sqrt(fc_prime) * b_o_mm * d_eff_mm
     
     # 3. Allowable Shear Capacity
@@ -115,11 +108,235 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     
     return V_u_N/1000, V_c_allowable_N/1000, d_eff, check_status, b_o_perimeter
 
+def calculate_As_req(Mu, b, d, fc_prime, fy):
+    """
+    Calculates the required steel area As (mm^2) for a rectangular section 
+    given Mu (kN-m), b (mm), d (mm), fc_prime (MPa), and fy (MPa).
+    Uses the ACI simplified quadratic formula method.
+    """
+    Mu_Nmm = Mu * 1e6 # Convert kN-m to N-mm
+    
+    if Mu_Nmm <= 0 or d <= 0:
+        return 0.0
+
+    phi = PHI_FLEXURE
+    
+    # Convert f'c and fy to N/mm^2 (which is MPa)
+    fc_prime_Mpa = fc_prime 
+    fy_Mpa = fy 
+
+    # 1. Calculate Required Resistance Factor Rn: Rn = Mu / (phi * b * d^2) in N/mm^2 (MPa)
+    # Ensure denominator is not zero
+    if b * d**2 == 0:
+        return 99999.0
+        
+    Rn = (Mu_Nmm / phi) / (b * d**2)
+    
+    # 2. Check maximum steel ratio (A simplified check using the balanced condition)
+    # Beta1 (for f'c <= 28 MPa, beta1=0.85, decreases by 0.05 for every 7MPa increase over 28)
+    if fc_prime_Mpa <= 28:
+        beta1 = 0.85
+    else:
+        beta1 = max(0.85 - 0.05 * (fc_prime_Mpa - 28) / 7.0, 0.65)
+        
+    # Max tensile strain of 0.005 for flexure is simplified to rho_max
+    
+    # Solving for reinforcement ratio rho using the quadratic formula for ACI Rn:
+    # rho = (0.85 * f'c / fy) * (1 - sqrt(1 - 2 * Rn / (0.85 * f'c)))
+    
+    # Check the term under the square root
+    term_under_sqrt = 1 - (2 * Rn) / (0.85 * fc_prime_Mpa)
+    
+    if term_under_sqrt < 0:
+        return 99999.0 # Rebar ratio too high / Depth insufficient
+        
+    rho = (0.85 * fc_prime_Mpa / fy_Mpa) * (1 - np.sqrt(term_under_sqrt))
+    
+    # Required Steel Area (As) in mm^2
+    As_req_mm2 = rho * b * d
+    
+    return As_req_mm2
+
+def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_factor):
+    """
+    Calculates the required steel area for flexure in the pile cap (simplified).
+    Moment is calculated by summing ultimate pile forces * distance to centroid (critical section).
+    """
+    
+    if d_eff <= 0:
+        return {}, "Effective depth is zero or negative."
+
+    results = {}
+    
+    # 1. Calculate Design Moments (Mu)
+    Mu_x_list = [] # Moment about X-axis (Resisted by steel parallel to Y)
+    Mu_y_list = [] # Moment about Y-axis (Resisted by steel parallel to X)
+    
+    for x, y, R_i in reactions:
+        # We use the absolute value of the reaction for flexure since we are checking the largest moment.
+        # R_i_u = abs(R_i) * load_factor # Using abs() for max design moment calculation
+        # A more conservative approach is to use R_i (signed) and check both max positive and max negative moments
+        R_i_u = R_i * load_factor
+        
+        # Moment about X-axis (using y-distance): sum R*y for y > 0
+        if y >= 0:
+            Mu_x_list.append(R_i_u * y)
+        
+        # Moment about Y-axis (using x-distance): sum R*x for x > 0
+        if x >= 0:
+            Mu_y_list.append(R_i_u * x)
+
+    # Max moment is the largest absolute value (tension or compression side)
+    Mu_x = abs(sum(Mu_x_list)) # Total design moment in Y direction (about X-axis)
+    Mu_y = abs(sum(Mu_y_list)) # Total design moment in X direction (about Y-axis)
+    
+    # d and b are in mm for the helper function
+    d = d_eff * 1000 
+    
+    # Direction X Reinforcement (Resists Mu_y over cap width Ly)
+    b_x = Ly * 1000 # Cap width in mm (Ly)
+    As_x_req = calculate_As_req(Mu_y, b_x, d, fc_prime, fy)
+    results['Mu_y'] = Mu_y
+    results['As_x_req'] = As_x_req
+
+    # Direction Y Reinforcement (Resists Mu_x over cap width Lx)
+    b_y = Lx * 1000 # Cap width in mm (Lx)
+    As_y_req = calculate_As_req(Mu_x, b_y, d, fc_prime, fy)
+    results['Mu_x'] = Mu_x
+    results['As_y_req'] = As_y_req
+
+    # Check for minimum reinforcement requirement (ACI 318-19 9.6.1.1)
+    rho_min_factor = max(0.25 * np.sqrt(fc_prime), 1.4)
+    rho_min = rho_min_factor / fy
+    
+    As_min_x = rho_min * b_x * d / 1000
+    As_min_y = rho_min * b_y * d / 1000 
+
+    results['As_x_req'] = max(As_x_req, As_min_x)
+    results['As_y_req'] = max(As_y_req, As_min_y)
+
+    return results, "O.K."
+
+# Create a visual representation of the pile group and the critical pile using Plotly
+def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap):
+    
+    # Prepare data for plotting
+    data = []
+    max_abs_R = max([abs(r[2]) for r in reactions]) if reactions else 1.0
+
+    # Calculate effective depth and critical pile
+    d_eff = H_cap - 0.15 
+    critical_pile_index = np.argmax([abs(r[2]) for r in reactions]) if reactions else -1
+    
+    for i, (x, y, R_i) in enumerate(reactions):
+        is_critical = "⭐" if i == critical_pile_index else ""
+        
+        # Scale marker size based on absolute reaction (max size 30, min size 10)
+        size = 10 + (abs(R_i) / max_abs_R) * 20 if max_abs_R > 0 else 15
+        
+        # Determine color (Red for compression, Blue for tension/uplift)
+        color = 'red' if R_i >= 0 else 'blue'
+        
+        data.append({
+            'x': x,
+            'y': y,
+            'R_i': R_i,
+            'label': f"Pile {i+1}<br>R = {R_i:,.0f} kN {is_critical}",
+            'color': color,
+            'size': size
+        })
+        
+    df = pd.DataFrame(data)
+
+    fig = go.Figure()
+    
+    # Draw Piles (Scatter plot)
+    fig.add_trace(go.Scatter(
+        x=df['x'],
+        y=df['y'],
+        mode='markers+text',
+        marker=dict(
+            color=df['color'],
+            size=df['size'],
+            sizemode='diameter',
+            opacity=0.8,
+            line=dict(width=1, color='black')
+        ),
+        text=[f"{r:,.0f} kN" for r in df['R_i']],
+        textposition="middle center",
+        hoverinfo='text',
+        hovertext=df['label'],
+        name='Piles'
+    ))
+
+    # Draw Punching Shear Perimeter
+    if critical_pile_index != -1 and d_eff > 0:
+        crit_x = df.iloc[critical_pile_index]['x']
+        crit_y = df.iloc[critical_pile_index]['y']
+        punching_radius = Dp/2 + d_eff/2
+        
+        # Draw the critical section (Punching Perimeter)
+        fig.add_shape(
+            type="circle",
+            xref="x", yref="y",
+            x0=crit_x - punching_radius, y0=crit_y - punching_radius,
+            x1=crit_x + punching_radius, y1=crit_y + punching_radius,
+            fillcolor='rgba(0, 255, 0, 0.1)',
+            line=dict(color="green", width=2, dash="dash"),
+            name='Punching Perimeter'
+        )
+        
+        # Add annotation for Punching Section
+        fig.add_annotation(
+            x=crit_x + punching_radius, y=crit_y + punching_radius * 1.2, 
+            text="Punching Section $b_o$", 
+            showarrow=False, 
+            font=dict(color="green", size=10)
+        )
+
+
+    # Calculate centroid offset
+    x_offset_center = (Nx - 1) * Sx / 2.0
+    y_offset_center = (Ny - 1) * Sy / 2.0
+    
+    # Draw Cap boundary (conceptual)
+    Lx_cap = (Nx - 1) * Sx + 2 * 0.5 
+    Ly_cap = (Ny - 1) * Sy + 2 * 0.5
+    
+    fig.add_shape(
+        type="rect",
+        xref="x", yref="y",
+        x0=-x_offset_center - 0.5, y0=-y_offset_center - 0.5,
+        x1=-x_offset_center - 0.5 + Lx_cap, y1=-y_offset_center - 0.5 + Ly_cap,
+        line=dict(color="gray", width=2, dash="dash"),
+        fillcolor='rgba(0, 0, 0, 0)',
+        name='Cap Boundary'
+    )
+    
+    # Configure Layout
+    fig.update_layout(
+        title='Pile Group Plan View (Size and Color by Reaction)',
+        xaxis_title="X-direction (m)",
+        yaxis_title="Y-direction (m)",
+        xaxis_range=[-x_offset_center - 0.75, x_offset_center + 0.75],
+        yaxis_range=[-y_offset_center - 0.75, y_offset_center + 0.75],
+        xaxis=dict(zeroline=True, zerolinecolor='black', zerolinewidth=1),
+        yaxis=dict(zeroline=True, zerolinecolor='black', zerolinewidth=1),
+        plot_bgcolor='white',
+        hovermode='closest',
+        showlegend=False,
+        height=500,
+        yaxis=dict(scaleanchor="x", scaleratio=1),
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
 # --- Streamlit Application ---
 
 st.set_page_config(layout="wide", page_title="Pile Group & Cap Design (Metric)")
 st.title("🏗️ Pile Group Design (Elastic Method)")
-st.caption("Calculates maximum pile reaction and performs two-way shear check based on ACI 318-19 simplified method (Metric Units: kN, m, MPa).")
+st.caption("Calculates maximum pile reaction, performs two-way shear check, and determines flexural steel requirements based on ACI 318-19 (Metric Units: kN, m, MPa).")
 
 # --- Input Section ---
 col1, col2 = st.columns(2)
@@ -130,9 +347,10 @@ with col1:
     Mx = st.number_input("Moment about X-axis $M_x$ (kN-m)", value=500.0, step=100.0)
     My = st.number_input("Moment about Y-axis $M_y$ (kN-m)", value=500.0, step=100.0)
     
-    st.header("3. Concrete & Safety Factors")
+    st.header("3. Concrete & Reinforcement")
     fc_prime = st.number_input("Concrete Strength $f'_c$ (MPa)", value=30.0, min_value=15.0, max_value=60.0, step=1.0)
-    load_factor = st.number_input("Load Factor for $V_u$ (e.g., 1.5)", value=1.5, min_value=1.0, step=0.1)
+    fy = st.number_input("Steel Yield Strength $f_y$ (MPa)", value=420.0, min_value=300.0, max_value=500.0, step=10.0)
+    load_factor = st.number_input("Load Factor for $V_u$ and $M_u$ (e.g., 1.5)", value=1.5, min_value=1.0, step=0.1)
 
 
 with col2:
@@ -233,101 +451,70 @@ with col_res2:
     else:
         st.info("Complete the input fields to perform the shear check.")
 
-# --- Visualization (Simplified Plan View) ---
-st.header("Pile Group Plan View (Conceptual)")
-st.caption(f"Grid Size: {Nx} piles @ {Sx}m in X, {Ny} piles @ {Sy}m in Y.")
+# --- Flexural Check Section ---
+st.divider()
+st.subheader("Flexural Reinforcement Design (Simplified ACI Check)")
+st.caption("Simplified check: Design moment $M_u$ is calculated by summing ultimate pile forces multiplied by the distance to the cap centroid. $\phi=0.9$.")
 
-# Create a visual representation of the pile group and the critical pile
-def draw_piles(reactions, Nx, Ny, Sx, Sy, Dp):
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
-    # Calculate effective depth for plotting the punching perimeter
-    # Note: d_eff must be calculated here or passed in, since it's not global
-    H_cap_val = st.session_state.get('H_cap', 1.2) # Retrieve H_cap from session state or use default
-    d_eff = H_cap_val - 0.15 
-    
-    fig, ax = plt.subplots(figsize=(6, 6))
-    
-    # Calculate overall cap dimensions (for drawing boundaries)
-    Lx = (Nx - 1) * Sx + 2 * 0.5 # Approximate cap edge distance 0.5m
-    Ly = (Ny - 1) * Sy + 2 * 0.5
-    
-    # Calculate centroid offset
-    x_offset_center = (Nx - 1) * Sx / 2.0
-    y_offset_center = (Ny - 1) * Sy / 2.0
-    
-    # Draw Cap boundary (conceptual)
-    rect = patches.Rectangle(
-        (-x_offset_center - 0.5, -y_offset_center - 0.5), 
-        Lx, 
-        Ly, 
-        linewidth=2, 
-        edgecolor='gray', 
-        facecolor='none', 
-        linestyle='--'
-    )
-    ax.add_patch(rect)
-    
-    max_abs_R = max([abs(r[2]) for r in reactions]) if reactions else 1.0
-    
-    # Find the critical pile for drawing
-    critical_pile = None
-    if reactions:
-        critical_pile_index = np.argmax([abs(r[2]) for r in reactions])
-        critical_pile = reactions[critical_pile_index]
+# Estimate Lx and Ly for calculating area (Cap dimensions assumed 0.5m past outermost piles)
+Lx_cap = (Nx - 1) * Sx + 2 * 0.5 
+Ly_cap = (Ny - 1) * Sy + 2 * 0.5
 
-    for x, y, R_i in reactions:
-        # Determine color based on reaction (Red for max compression, Blue for max tension)
-        color = 'red' if R_i == R_max else 'blue' if R_i == -R_max else 'gray'
-        
-        # Scale size based on reaction magnitude
-        size_factor = (abs(R_i) / max_abs_R) * 0.4 + 0.6 # size between 0.6 and 1.0
-        
-        # Draw Pile
-        circle = patches.Circle((x, y), Dp/2 * size_factor, color=color, alpha=0.7)
-        ax.add_patch(circle)
-        
-        # Add a label for the reaction value
-        ax.text(x, y, f"{R_i:,.0f} kN", fontsize=8, ha='center', va='center', color='black' if abs(R_i) / max_abs_R < 0.8 else 'white')
-
-    # Draw the critical pile's punching shear area
-    if critical_pile and d_eff > 0:
-        crit_x, crit_y, _ = critical_pile
-        # Critical perimeter is a circle of diameter Dp + d_eff
-        punching_radius = Dp/2 + d_eff/2
-        punching_circle = patches.Circle(
-            (crit_x, crit_y), 
-            punching_radius, 
-            color='lime', 
-            alpha=0.2, 
-            linestyle='--'
+# Perform flexural check
+if R_max > 0 and H_cap > 0 and fy > 0:
+    # Get d_eff from shear check
+    _, _, d_eff, _, _ = check_punching_shear(R_max, H_cap, Dp, fc_prime, load_factor) 
+    
+    flexural_results, status = check_flexural_reinforcement(reactions, d_eff, Lx_cap, Ly_cap, fc_prime, fy, load_factor)
+    
+    flex_col1, flex_col2 = st.columns(2)
+    
+    with flex_col1:
+        st.markdown(f"#### X-Direction Reinf. (Perpendicular to Y-axis)")
+        st.markdown(f"**Cap Width $L_y$ (b):** {Ly_cap:,.2f} m")
+        st.metric(
+            label="Design Moment $M_{u,y}$ (about Y-axis)", 
+            value=f"{flexural_results['Mu_y']:,.2f} kN-m"
         )
-        ax.add_patch(punching_circle)
-        ax.text(crit_x + punching_radius, crit_y + punching_radius, "Punching Section", fontsize=8, color='green')
+        if flexural_results['As_x_req'] == 99999.0:
+             st.error("Depth $H_{cap}$ is insufficient for flexure in X-dir.")
+        else:
+             st.metric(
+                label="Required Steel Area $A_{s,x}$", 
+                value=f"{flexural_results['As_x_req']:,.0f} $mm^2$",
+                help="Includes minimum reinforcement requirements (ACI 318-19 9.6.1.1)"
+             )
 
+    with flex_col2:
+        st.markdown(f"#### Y-Direction Reinf. (Perpendicular to X-axis)")
+        st.markdown(f"**Cap Width $L_x$ (b):** {Lx_cap:,.2f} m")
+        st.metric(
+            label="Design Moment $M_{u,x}$ (about X-axis)", 
+            value=f"{flexural_results['Mu_x']:,.2f} kN-m"
+        )
+        if flexural_results['As_y_req'] == 99999.0:
+             st.error("Depth $H_{cap}$ is insufficient for flexure in Y-dir.")
+        else:
+            st.metric(
+                label="Required Steel Area $A_{s,y}$", 
+                value=f"{flexural_results['As_y_req']:,.0f} $mm^2$",
+                help="Includes minimum reinforcement requirements (ACI 318-19 9.6.1.1)"
+            )
 
-    # Set limits and aspect ratio
-    x_span = max(Lx, 1.0)
-    y_span = max(Ly, 1.0)
-    
-    ax.set_xlim([-x_offset_center - 0.75, x_offset_center + 0.75])
-    ax.set_ylim([-y_offset_center - 0.75, y_offset_center + 0.75])
+else:
+    st.info("Complete the input fields (especially Steel Strength) to perform the flexural check.")
 
-    ax.set_xlabel("X-direction (m)")
-    ax.set_ylabel("Y-direction (m)")
-    ax.set_title("Pile Group Plan (Color/Size based on Load)")
-    ax.axhline(0, color='black', linestyle='-', linewidth=0.5)
-    ax.axvline(0, color='black', linestyle='-', linewidth=0.5)
-    ax.set_aspect('equal', adjustable='box')
-    plt.grid(True, linestyle=':', alpha=0.6)
-    st.pyplot(fig)
+# --- Visualization (Plotly Plan View) ---
+st.divider()
+st.header("Pile Group Plan View (Plotly Interactive)")
+st.caption(f"Piles are colored/sized by reaction magnitude (Red = Compression, Blue = Tension).")
 
 # Store H_cap in session state so draw_piles can access d_eff for plotting
 st.session_state['H_cap'] = H_cap
 
 if reactions:
     try:
-        draw_piles(reactions, Nx, Ny, Sx, Sy, Dp)
+        draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap)
     except Exception as e:
-        st.warning(f"Could not generate plot. Error: {e}")
+        # st.warning(f"Could not generate Plotly chart. Error: {e}") # Suppressing detailed internal error
+        st.warning("Could not generate interactive plot. Ensure all inputs are valid.")
