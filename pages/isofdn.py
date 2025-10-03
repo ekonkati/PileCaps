@@ -12,7 +12,7 @@ TAU_C_MAX = {
 
 # Simplified lookup for percentage steel pt (Table 19, IS 456:2000)
 def get_tau_c(fck, pt):
-    pt = max(0.15, min(pt, 2.0)) # Limit pt between 0.15% and 2.0%
+    pt = max(0.15, min(pt, 2.0))
     if fck == 20:
         if pt < 0.25: return 0.36
         if pt < 0.50: return 0.48
@@ -33,6 +33,17 @@ def get_tau_c(fck, pt):
         return 0.82
 
 # --- CORE ENGINEERING FUNCTIONS ---
+
+def calculate_provided_ast(width_m, phi_mm, spacing_mm):
+    """Calculates total provided steel area (m²) over the given width."""
+    if spacing_mm == 0: return 0.0
+    
+    As_bar = np.pi * (phi_mm / 1000)**2 / 4 # Area of one bar (m²)
+    # Number of bars * Area of one bar (provided over the total width)
+    Ast_prov_total = (width_m / (spacing_mm / 1000)) * As_bar
+    Ast_prov_per_meter = Ast_prov_total / width_m # Ast per meter (m²/m)
+    
+    return Ast_prov_total, Ast_prov_per_meter * 1000000 # returns total m² and mm²/m
 
 def calculate_ast_required(Mu_kNm, B_m, d_m, fc, fy):
     """Calculates required steel area (Ast) in mm² per meter width."""
@@ -55,12 +66,13 @@ def calculate_ast_required(Mu_kNm, B_m, d_m, fc, fy):
 
     Ast_req_m2 = (0.5 * fc / fy) * (1 - np.sqrt(1 - R_term)) * B_mm * d_mm
     
+    # Ast_min (0.12% of gross area B*D is typical, but 0.12% of B*d is simpler for Ast/m)
     Ast_min_m2 = 0.0012 * B_mm * d_mm
     
     Ast_final = max(Ast_req_m2, Ast_min_m2)
     return Ast_final, "OK"
 
-def one_way_shear_check(Pu, q_net_u, L, B, bc, d, fc, Ast_prov):
+def one_way_shear_check(Pu, q_net_u, L, B, bc, d, fc, Ast_prov_total_m2):
     """Performs one-way shear check (critical section at 'd' from column face)."""
     
     a_crit = (L - bc) / 2 - d
@@ -71,7 +83,8 @@ def one_way_shear_check(Pu, q_net_u, L, B, bc, d, fc, Ast_prov):
     Vu = q_net_u * B * a_crit
     tau_v = Vu * 1000 / (B * 1000 * d * 1000)
     
-    pt_prov = (Ast_prov / (B * d)) * 100
+    # Use total provided steel for the shear resistance calculation (pt ratio)
+    pt_prov = (Ast_prov_total_m2 / (B * d)) * 100 
     tau_c = get_tau_c(fc, pt_prov)
     
     result = "OK" if tau_v < tau_c else "FAIL"
@@ -107,12 +120,17 @@ def punching_shear_check(Pu, q_net_u, L, B, bc, dc, d, fc):
     
     return Vu_p, tau_vp, tau_c_p, tau_c_max, result
 
-def design_footing_checks(L, B, D, bc, dc, fc, fy, SBC, gamma_c, Pu, P_service, Mucx, Mucz, phi, spacing):
-    """Runs all checks and returns a comprehensive dictionary of results."""
+def design_footing_checks(L, B, D, bc, dc, fc, fy, SBC, gamma_c, Pu, P_service, Mucx, Mucz, 
+                          phi_bx, s_bx, phi_bz, s_bz, phi_tx, s_tx, phi_tz, s_tz):
 
-    d = D - 0.075 
+    # 1. Effective Depths (assuming X-bars are bottom layer)
+    d_x = D - 0.075 # For X-direction (Moment Mu_x, Width B)
+    d_z = d_x - (phi_bx / 1000) # For Z-direction (Moment Mu_z, Width L)
     
-    # 1. Base Pressure Check
+    if d_x <= 0 or d_z <= 0:
+        return {"FINAL_STATUS": "FAIL_GEOMETRY", "Error": "Effective depth is zero or negative. Increase D."}
+
+    # 2. Base Pressure Check
     A_actual = L * B
     W_footing = gamma_c * L * B * D
     P_total_service = P_service + W_footing
@@ -121,55 +139,76 @@ def design_footing_checks(L, B, D, bc, dc, fc, fy, SBC, gamma_c, Pu, P_service, 
     e_z = abs(Mucz / P_service)
     
     if e_x > L / 6 or e_z > B / 6:
-        q_max = 9999.0
-        q_min = 0.0
-        pressure_status = "FAIL (Uplift/High Eccentricity)"
+        q_max, q_min, pressure_status = 9999.0, 0.0, "FAIL (Uplift/High Eccentricity)"
     else:
         q_max = P_total_service / A_actual + (6 * Mucx) / (B * L**2) + (6 * Mucz) / (L * B**2)
         q_min = P_total_service / A_actual - (6 * Mucx) / (B * L**2) - (6 * Mucz) / (L * B**2)
         
         pressure_status = "OK" if q_max < SBC else "FAIL"
-        if q_min < 0:
-             pressure_status = "FAIL (Tension/Uplift)"
+        if q_min < 0: pressure_status = "FAIL (Tension/Uplift)"
         
-    # 2. Bending Check (Design Moment)
     q_net_u = Pu / A_actual 
-    
+
+    # 3. Bending Check (X-Direction)
     a_x = (L - bc) / 2
     M_u_x = q_net_u * B * a_x**2 / 2 
+    Ast_req_x, moment_status_x = calculate_ast_required(M_u_x, B, d_x, fc, fy)
+    Ast_prov_x_total, Ast_prov_x_perm = calculate_provided_ast(B, phi_bx, s_bx)
     
-    Ast_req_x, moment_status = calculate_ast_required(M_u_x, B, d, fc, fy)
+    # 4. Bending Check (Z-Direction)
+    a_z = (B - dc) / 2
+    M_u_z = q_net_u * L * a_z**2 / 2 
+    Ast_req_z, moment_status_z = calculate_ast_required(M_u_z, L, d_z, fc, fy)
+    Ast_prov_z_total, Ast_prov_z_perm = calculate_provided_ast(L, phi_bz, s_bz)
+
+    # 5. Shear Checks (Use the lesser effective depth d_z for conservatism)
+    d_shear = d_z
     
-    # 3. Provided Steel Calculation
-    As_bar = np.pi * (phi/1000)**2 / 4
-    Ast_prov_x_total = (B * As_bar) / (spacing/1000) 
-    Ast_req_total = Ast_req_x * (B/1000) 
+    # Use Ast_prov_x_total for one-way shear check
+    Vu_1w, tau_v_1w, tau_c_1w, shear_1w_status = one_way_shear_check(Pu, q_net_u, L, B, bc, d_shear, fc, Ast_prov_x_total)
     
-    # 4. Shear Checks
-    Vu_1w, tau_v_1w, tau_c_1w, shear_1w_status = one_way_shear_check(Pu, q_net_u, L, B, bc, d, fc, Ast_prov_x_total)
+    Vu_p, tau_v_p, tau_c_p, tau_c_max, shear_p_status = punching_shear_check(Pu, q_net_u, L, B, bc, dc, d_shear, fc)
     
-    Vu_p, tau_v_p, tau_c_p, tau_c_max, shear_p_status = punching_shear_check(Pu, q_net_u, L, B, bc, dc, d, fc)
+    # 6. Top Steel (Check against minimum steel requirement, 0.12% of gross area B*D)
+    Ast_min_temp = 0.0012 * B * D * 1000000 # mm² (total area)
     
-    # 5. Final Status
+    Ast_prov_tx_total, _ = calculate_provided_ast(B, phi_tx, s_tx)
+    Ast_prov_tz_total, _ = calculate_provided_ast(L, phi_tz, s_tz)
+    
+    # 7. Final Status Compilation
     final_status = "OK"
     if pressure_status.startswith("FAIL"): final_status = "FAIL"
-    if moment_status.startswith("FAIL"): final_status = "FAIL_DEPTH"
-    if shear_1w_status.startswith("FAIL"): final_status = "FAIL_SHEAR"
-    if shear_p_status.startswith("FAIL"): final_status = "FAIL_SHEAR"
-    if Ast_prov_x_total < Ast_req_total: final_status = "FAIL_REBAR"
-    
+    if moment_status_x.startswith("FAIL") or moment_status_z.startswith("FAIL"): final_status = "FAIL_DEPTH"
+    if shear_1w_status.startswith("FAIL") or shear_p_status.startswith("FAIL"): final_status = "FAIL_SHEAR"
+    if Ast_prov_x_total < Ast_req_x * (B/1000) or Ast_prov_z_total < Ast_req_z * (L/1000): final_status = "FAIL_REBAR"
+    if (Ast_prov_tx_total + Ast_prov_tz_total) < Ast_min_temp: final_status = "FAIL_TOP_MIN_REBAR"
+
+
     # RESULTS DICTIONARY
     results = {
         "Footing Length (L) [m]": L, "Footing Width (B) [m]": B, "Trial Depth (D) [m]": D, 
-        "Effective Depth (d) [m]": d, "Max Soil Pressure [kN/m²]": q_max, 
+        "d_x [m]": d_x, "d_z [m]": d_z, "Max Soil Pressure [kN/m²]": q_max, 
         "Min Soil Pressure [kN/m²]": q_min, "Pressure Status": pressure_status,
-        "Design Moment (Mu_x) [kNm]": M_u_x, "Req. Steel (Ast_x) [mm²/m]": Ast_req_x, 
-        "Moment Status": moment_status, "1W Shear Force (Vu) [kN]": Vu_1w, 
-        "1W Shear Stress (τv) [N/mm²]": tau_v_1w, "1W Permissible (τc) [N/mm²]": tau_c_1w, 
-        "1W Shear Status": shear_1w_status, "Punching Shear Force (Vup) [kN]": Vu_p,
+        
+        # X-Direction Bending
+        "Mu_x [kNm]": M_u_x, "Ast_req_x [mm²/m]": Ast_req_x, "Ast_prov_x_total [m²]": Ast_prov_x_total,
+        "Ast_prov_x_perm [mm²/m]": Ast_prov_x_perm, "Moment Status X": moment_status_x,
+        
+        # Z-Direction Bending
+        "Mu_z [kNm]": M_u_z, "Ast_req_z [mm²/m]": Ast_req_z, "Ast_prov_z_total [m²]": Ast_prov_z_total,
+        "Ast_prov_z_perm [mm²/m]": Ast_prov_z_perm, "Moment Status Z": moment_status_z,
+        
+        # Shear Checks
+        "1W Shear Force (Vu) [kN]": Vu_1w, "1W Shear Stress (τv) [N/mm²]": tau_v_1w, 
+        "1W Permissible (τc) [N/mm²]": tau_c_1w, "1W Shear Status": shear_1w_status,
         "Punching Shear Stress (τvp) [N/mm²]": tau_v_p, "Punching Permissible (τcp) [N/mm²]": tau_c_p, 
-        "Punching Shear Status": shear_p_status, "Ast_prov_total [m²]": Ast_prov_x_total,
-        "Ast_req_total [m²]": Ast_req_total, "FINAL_STATUS": final_status
+        "Punching Shear Status": shear_p_status,
+        
+        # Top Steel
+        "Ast_min_temp [mm²]": Ast_min_temp, 
+        "Ast_prov_top_total [mm²]": (Ast_prov_tx_total + Ast_prov_tz_total) * 1000000,
+        
+        "FINAL_STATUS": final_status
     }
     return results
 
@@ -181,7 +220,7 @@ def plot_footing_3d(L, B, D, bc, dc):
     footing = go.Mesh3d(
         x=[0, L, L, 0, 0, L, L, 0],
         y=[0, 0, B, B, 0, 0, B, B],
-        z=[-D, -D, -D, -D, 0, 0, 0, 0], # Base at -D, Top at 0
+        z=[-D, -D, -D, -D, 0, 0, 0, 0], 
         opacity=0.6,
         color='lightblue',
         name='Footing',
@@ -195,7 +234,7 @@ def plot_footing_3d(L, B, D, bc, dc):
     col_x_end = L/2 + bc/2
     col_y_start = B/2 - dc/2
     col_y_end = B/2 + dc/2
-    col_height = 1.5*D # Extend column above footing
+    col_height = 1.5*D
     
     col_x = [col_x_start, col_x_end, col_x_end, col_x_start, col_x_start, col_x_end, col_x_end, col_x_start]
     col_y = [col_y_start, col_y_start, col_y_end, col_y_end, col_y_start, col_y_start, col_y_end, col_y_end]
@@ -256,7 +295,7 @@ def plot_base_pressure_diagram(L, B, P_total_service, Mucx, Mucz, SBC):
 
 st.set_page_config(layout="wide")
 st.title("🏗️ Isolated Foundation Design | IS 456:2000")
-st.caption("Enhanced design tool with detailed structural checks, rebar selection, and load case management.")
+st.caption("Enhanced tool with detailed two-way reinforcement, structural checks, and load case management.")
 
 # Initialize or load load cases dataframe
 default_data = {
@@ -292,10 +331,29 @@ B_input = st.sidebar.number_input("Footing Width (B) [m]", value=2.2, step=0.1, 
 D_input = st.sidebar.number_input("Overall Depth (D) [m]", value=0.50, step=0.05, min_value=0.2)
 st.sidebar.markdown("---")
 
-# Reinforcement Selection
-st.sidebar.subheader("3️⃣ Reinforcement Design (X-direction)")
-rebar_phi = st.sidebar.selectbox("Bar Diameter (φ) [mm]", options=[10, 12, 16, 20], index=1)
-rebar_spacing_mm = st.sidebar.number_input("Spacing (s) [mm]", value=150.0, step=10.0, min_value=50.0, max_value=300.0)
+# --- REINFORCEMENT INPUTS (DF equivalent setup) ---
+st.sidebar.subheader("3️⃣ Reinforcement Design")
+
+# BOTTOM REBAR
+with st.sidebar.expander("⬇️ Bottom Rebar (Moment Steel)", expanded=True):
+    st.markdown("**X-direction (Along L, Width B)**")
+    phi_bx = st.selectbox("Bar Diameter, $\\phi_x$ [mm]", options=[10, 12, 16, 20], index=1, key="phi_bx")
+    s_bx = st.number_input("Spacing, $s_x$ [mm]", value=150.0, step=10.0, min_value=50.0, max_value=300.0, key="s_bx")
+    
+    st.markdown("**Z-direction (Along B, Width L)**")
+    phi_bz = st.selectbox("Bar Diameter, $\\phi_z$ [mm]", options=[10, 12, 16, 20], index=1, key="phi_bz")
+    s_bz = st.number_input("Spacing, $s_z$ [mm]", value=150.0, step=10.0, min_value=50.0, max_value=300.0, key="s_bz")
+
+# TOP REBAR
+with st.sidebar.expander("⬆️ Top Rebar (Minimum/Temp. Steel)", expanded=False):
+    st.markdown("*Note: Top steel provides minimum area required for temperature and shrinkage.*")
+    st.markdown("**X-direction (Along L, Width B)**")
+    phi_tx = st.selectbox("Bar Diameter, $\\phi_{tx}$ [mm]", options=[8, 10, 12], index=1, key="phi_tx")
+    s_tx = st.number_input("Spacing, $s_{tx}$ [mm]", value=250.0, step=10.0, min_value=50.0, max_value=300.0, key="s_tx")
+
+    st.markdown("**Z-direction (Along B, Width L)**")
+    phi_tz = st.selectbox("Bar Diameter, $\\phi_{tz}$ [mm]", options=[8, 10, 12], index=1, key="phi_tz")
+    s_tz = st.number_input("Spacing, $s_{tz}$ [mm]", value=250.0, step=10.0, min_value=50.0, max_value=300.0, key="s_tz")
 
 # --- LOAD CASE ENTRY ---
 st.subheader("Load Case Entry (Copy/Paste or Direct Edit) 📋")
@@ -326,7 +384,7 @@ else:
     
     critical_ultimate_row = load_cases_df.loc[load_cases_df['Pu_Factored'].idxmax()]
     Pu_crit = critical_ultimate_row['Pu_Factored']
-
+    
     # --- RUN DESIGN AND CHECKS ---
     st.markdown("---")
     st.header("Design Check Results")
@@ -337,90 +395,86 @@ else:
             L=L_input, B=B_input, D=D_input, bc=bc, dc=dc, fc=fc, fy=fy, 
             SBC=SBC, gamma_c=gamma_c, Pu=Pu_crit, P_service=P_service_crit, 
             Mucx=Mucx_service_crit, Mucz=Mucz_service_crit, 
-            phi=rebar_phi, spacing=rebar_spacing_mm
+            phi_bx=phi_bx, s_bx=s_bx, phi_bz=phi_bz, s_bz=s_bz, 
+            phi_tx=phi_tx, s_tx=s_tx, phi_tz=phi_tz, s_tz=s_tz
         )
-
+        
         # --- DISPLAY CORE RESULTS ---
         colA, colB, colC = st.columns(3)
         
         with colA:
-            final_status = design_results['FINAL_STATUS']
-            if final_status == "OK":
-                st.success(f"✅ Design Status: **PASSED**")
-            elif "FAIL_SHEAR" in final_status or "FAIL_DEPTH" in final_status:
-                st.error(f"❌ Design Status: **FAILED (INSUFFICIENT DEPTH D)**")
-            elif "FAIL_REBAR" in final_status:
-                st.warning(f"⚠️ Design Status: **FAILED (INSUFFICIENT REBAR)**")
-            else:
-                st.error(f"❌ Design Status: **FAILED (SBC/Uplift)**")
-            
-            st.metric("Critical Factored Load (Pu)", f"{Pu_crit:.2f} kN")
-            st.metric("Design Moment (Mu,x)", f"{design_results['Design Moment (Mu_x) [kNm]']:.2f} kNm")
-            st.metric("Req. Steel (Ast, X-Dir)", f"{design_results['Req. Steel (Ast_x) [mm²/m]']:.2f} mm²/m")
-
-        with colB:
             st.subheader("Footing Geometry")
             st.metric("Footing Size", f"{L_input:.2f} m x {B_input:.2f} m")
-            st.metric("Overall Depth", f"{D_input:.2f} m")
-            st.metric("Effective Depth (d)", f"{design_results['Effective Depth (d) [m]']:.3f} m")
+            st.metric("Overall Depth (D)", f"{D_input:.2f} m")
+            st.metric("Effective Depth ($d_x/d_z$)", f"{design_results['d_x [m]']:.3f} m / {design_results['d_z [m]']:.3f} m")
             
+        with colB:
+            st.subheader("Bottom Steel (X-Direction)")
+            st.metric("Design Moment ($M_u$, x)", f"{design_results['Mu_x [kNm]']:.2f} kNm")
+            st.metric("Required $A_{st, bx}$", f"{design_results['Ast_req_x [mm²/m]']:.2f} mm²/m")
+            st.metric("Provided $A_{st, bx}$", f"{design_results['Ast_prov_x_perm [mm²/m]']:.2f} mm²/m (T{phi_bx} @ {s_bx} mm)")
+
         with colC:
-            st.subheader("Provided Reinforcement")
-            
-            As_bar = np.pi * (rebar_phi/1000)**2 / 4 
-            N_bars = np.floor(L_input / (rebar_spacing_mm / 1000)) + 1 
-            Ast_prov_total_m2 = design_results['Ast_prov_total [m²]']
-            Ast_req_total_m2 = design_results['Ast_req_total [m²]']
-            
-            st.metric("Bar Diameter (φ)", f"T{rebar_phi} mm")
-            st.metric("Spacing (s)", f"{rebar_spacing_mm:.0f} mm")
-            st.metric("Provided Bars (Nos)", f"{int(N_bars)} Nos. (over {B_input}m width)")
-            
-            if Ast_prov_total_m2 > Ast_req_total_m2:
-                 st.success(f"Ast Prov ({Ast_prov_total_m2*10000:.2f} cm²) > Req ({Ast_req_total_m2*10000:.2f} cm²) **(OK)**")
-            else:
-                 st.error(f"Ast Prov ({Ast_prov_total_m2*10000:.2f} cm²) < Req ({Ast_req_total_m2*10000:.2f} cm²) **(FAIL)**")
-
-
-        # --- DESIGN VISUALIZATIONS ---
+            st.subheader("Bottom Steel (Z-Direction)")
+            st.metric("Design Moment ($M_u$, z)", f"{design_results['Mu_z [kNm]']:.2f} kNm")
+            st.metric("Required $A_{st, bz}$", f"{design_results['Ast_req_z [mm²/m]']:.2f} mm²/m")
+            st.metric("Provided $A_{st, bz}$", f"{design_results['Ast_prov_z_perm [mm²/m]']:.2f} mm²/m (T{phi_bz} @ {s_bz} mm)")
+        
+        
+        # --- DESIGN VISUALIZATIONS AND CHECKS ---
         st.markdown("---")
-        st.header("Design Visualizations")
+        st.header("Design Visualizations and Final Checks")
+        
         colD, colE, colF = st.columns([1, 1, 1])
-
+        
+        # 3D Sketch
         with colD:
             st.subheader("3D Footing & Pedestal Sketch")
             st.plotly_chart(plot_footing_3d(L_input, B_input, D_input, bc, dc), use_container_width=True)
-            st.caption("Footing Base is at Z=-D, Pedestal top extends to Z=1.5D.")
-
+            
+            final_status = design_results['FINAL_STATUS']
+            if final_status == "OK":
+                st.success(f"✅ Final Design Status: **PASSED ALL CHECKS**")
+            elif "FAIL" in final_status:
+                st.error(f"❌ Final Design Status: **FAILED** ({final_status.replace('FAIL_', '')})")
+            
+        # Base Pressure Diagram
         with colE:
             st.subheader("Soil Base Pressure Diagram")
             st.plotly_chart(plot_base_pressure_diagram(L_input, B_input, P_service_crit, Mucx_service_crit, Mucz_service_crit, SBC), use_container_width=True)
             
+            st.markdown("##### SBC Check")
             if design_results['Pressure Status'].startswith("FAIL"):
-                st.error(f"SBC Check: **{design_results['Pressure Status']}**. Max Pressure: {design_results['Max Soil Pressure [kN/m²]']:.2f} kN/m².")
+                st.error(f"FAIL: Max Pressure: {design_results['Max Soil Pressure [kN/m²]']:.2f} kN/m² > SBC: {SBC:.2f} kN/m².")
             else:
-                st.success(f"SBC Check: **PASSED**. Max Pressure: {design_results['Max Soil Pressure [kN/m²]']:.2f} kN/m².")
-
+                st.success(f"OK: Max Pressure: {design_results['Max Soil Pressure [kN/m²]']:.2f} kN/m² (SBC: {SBC:.2f} kN/m²).")
+                
+        # Detailed Structural Checks
         with colF:
             st.subheader("Detailed Structural Checks")
             
-            st.markdown("##### 1. Bending Depth Check")
-            if design_results['Moment Status'].startswith("FAIL"):
-                 st.error(f"FAIL: Bending depth is insufficient. **Increase D**.")
+            st.markdown("##### 1. Bending Capacity (Depth Check)")
+            if design_results['Moment Status X'].startswith("FAIL") or design_results['Moment Status Z'].startswith("FAIL"):
+                 st.error(f"FAIL: Bending depth is insufficient for moment $M_u$. **Increase D**.")
             else:
-                 st.success("Bending Moment Check **(OK)**")
+                 st.success("Bending Moment Depth Check **(OK)**")
+                 
+            st.markdown("##### 2. Shear Capacity (Punching/One-Way)")
+            if design_results['Punching Shear Status'].startswith("FAIL") or design_results['1W Shear Status'].startswith("FAIL"):
+                st.error(f"FAIL: Shear stresses exceeded (Punching $\\tau_{{vp}}$: {design_results['Punching Shear Stress (τvp) [N/mm²]']:.3f}). **Increase D**.")
+            else:
+                st.success(f"Shear Checks **(OK)**. $\\tau_{{vp}}$: {design_results['Punching Shear Stress (τvp) [N/mm²]']:.3f} N/mm².")
 
-            st.markdown("##### 2. One-Way Shear Check")
-            if design_results['1W Shear Status'].startswith("FAIL"):
-                st.error(f"FAIL: τv ({design_results['1W Shear Stress (τv) [N/mm²]']:.3f}) > τc ({design_results['1W Permissible (τc) [N/mm²]']:.3f}). **Increase D**.")
+            st.markdown("##### 3. Reinforcement Checks")
+            if final_status == "FAIL_REBAR":
+                st.error(f"FAIL: Provided bottom steel is less than required for strength.")
+            elif final_status == "FAIL_TOP_MIN_REBAR":
+                 st.warning(f"FAIL: Provided top steel ({(design_results['Ast_prov_top_total [mm²]'] / 100):.2f} cm²) is less than minimum required ({(design_results['Ast_min_temp [mm²]'] / 100):.2f} cm²).")
             else:
-                st.success(f"OK: τv ({design_results['1W Shear Stress (τv) [N/mm²]']:.3f}) < τc ({design_results['1W Permissible (τc) [N/mm²]']:.3f})")
-
-            st.markdown("##### 3. Punching Shear Check")
-            if design_results['Punching Shear Status'].startswith("FAIL"):
-                st.error(f"FAIL: τvp ({design_results['Punching Shear Stress (τvp) [N/mm²]']:.3f}) > τc,p ({design_results['Punching Permissible (τcp) [N/mm²]']:.3f}). **Increase D**.")
-            else:
-                st.success(f"OK: τvp ({design_results['Punching Shear Stress (τvp) [N/mm²]']:.3f}) < τc,p ({design_results['Punching Permissible (τcp) [N/mm²]']:.3f})")
+                st.success("Reinforcement Areas **(OK)**.")
 
     except Exception as e:
-        st.error(f"An unexpected error occurred during design calculation. Please check all input values for validity. Error detail: {e}")
+        if "FAIL_GEOMETRY" in str(design_results):
+            st.error(f"FATAL ERROR: {design_results['Error']}")
+        else:
+            st.error(f"An unexpected error occurred during design calculation. Error detail: {e}")
