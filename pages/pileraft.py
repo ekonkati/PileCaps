@@ -91,7 +91,7 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     d_eff = H_cap - 0.15 
     
     if d_eff <= 0:
-        return 0, 0, d_eff, "Depth too small for effective cover."
+        return 0, 0, d_eff, "Depth too small for effective cover.", 0
         
     # Critical section for two-way shear is at d_eff/2 from the pile face
     b_o_perimeter = np.pi * (D_pile + d_eff) # Circumference of a circle with radius (D_pile/2 + d_eff/2)
@@ -101,27 +101,11 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     V_u_N = V_u_kN * 1000 # Convert to Newtons
     
     # 2. Nominal Concrete Shear Capacity (Vc)
-    # ACI 318-19, simplified, Vc = 0.33 * lambda * sqrt(f'c) * bo * d
-    # Using lambda=1.0 for normal-weight concrete. f'c must be in MPa (N/mm^2).
-    # bo in mm, d in mm, Vc in N.
-    # To keep units in m and MPa, we need to adjust the constant:
-    # 0.33 * sqrt(f'c [MPa]) * bo [m] * d [m] -> result is in N.
-    # 1 MPa = 1 N/mm^2.
-    # 0.33 * sqrt(f'c) * (b_o*1000) * (d*1000) -> N
-    
-    # Simplify constant to keep units in N (f'c in MPa, b_o and d in m)
-    # Since sqrt(MPa) = sqrt(N/mm^2), and bo*d is in m^2, 
-    # we need a scaling factor of 1000^2 * 1 / 1000 = 1000. Wait, that's complicated.
-    
-    # Simpler: Convert all inputs to mm/N (standard ACI unit system)
+    # ACI 318-19 Eq. 22.6.5.2: Vc = 0.17 * sqrt(f'c) * bo * d (f'c in MPa, bo, d in mm, Vc in N)
     f_c_psi = fc_prime * 145.038 # Convert MPa to psi
     d_eff_mm = d_eff * 1000 
     b_o_mm = b_o_perimeter * 1000
     
-    # Vc formula in N (f'c in psi, bo, d in mm)
-    # 0.33 * sqrt(f'c) is the simplified metric ACI 318 constant in N/mm^2
-    # The constant is 0.17 for Metric (MPa) or 2/3 for psi (in terms of N/mm^2)
-    # ACI 318-19 Eq. 22.6.5.2: Vc = 0.17 * sqrt(f'c) * bo * d (f'c in MPa, bo, d in mm, Vc in N)
     V_c_N = 0.17 * np.sqrt(fc_prime) * b_o_mm * d_eff_mm
     
     # 3. Allowable Shear Capacity
@@ -258,6 +242,11 @@ def draw_piles(reactions, Nx, Ny, Sx, Sy, Dp):
     import matplotlib.pyplot as plt
     import matplotlib.patches as patches
     
+    # Calculate effective depth for plotting the punching perimeter
+    # Note: d_eff must be calculated here or passed in, since it's not global
+    H_cap_val = st.session_state.get('H_cap', 1.2) # Retrieve H_cap from session state or use default
+    d_eff = H_cap_val - 0.15 
+    
     fig, ax = plt.subplots(figsize=(6, 6))
     
     # Calculate overall cap dimensions (for drawing boundaries)
@@ -319,9 +308,6 @@ def draw_piles(reactions, Nx, Ny, Sx, Sy, Dp):
 
 
     # Set limits and aspect ratio
-    x_coords_all = x_coords if Nx > 1 else np.array([0])
-    y_coords_all = y_coords if Ny > 1 else np.array([0])
-    
     x_span = max(Lx, 1.0)
     y_span = max(Ly, 1.0)
     
@@ -337,6 +323,8 @@ def draw_piles(reactions, Nx, Ny, Sx, Sy, Dp):
     plt.grid(True, linestyle=':', alpha=0.6)
     st.pyplot(fig)
 
+# Store H_cap in session state so draw_piles can access d_eff for plotting
+st.session_state['H_cap'] = H_cap
 
 if reactions:
     try:
