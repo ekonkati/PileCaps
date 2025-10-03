@@ -33,12 +33,10 @@ def calculate_pile_reactions(P, Mx, My, Nx, Ny, Sx, Sy):
     pile_coords = []
     
     # Calculate coordinate offsets from centroid
-    # X-coordinates range from $-(N_x-1)/2 \cdot S_x$ to $(N_x-1)/2 \cdot S_x$
     x_offset = (Nx - 1) * Sx / 2.0
     for i in range(Nx):
         x = i * Sx - x_offset
         
-        # Y-coordinates range from $-(N_y-1)/2 \cdot S_y$ to $(N_y-1)/2 \cdot S_y$
         y_offset = (Ny - 1) * Sy / 2.0
         for j in range(Ny):
             y = j * Sy - y_offset
@@ -84,22 +82,20 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     d_eff = H_cap - 0.15 
     
     if d_eff <= 0:
-        # Prevent division by zero or negative dimensions
         return 0, 0, d_eff, "Depth too small for effective cover.", 0
         
     # Critical section for two-way shear is at $d_{eff}/2$ from the pile face
-    b_o_perimeter = np.pi * (D_pile + d_eff) # Circumference of a circle with radius $(D_{pile}/2 + d_{eff}/2)$
+    b_o_perimeter = np.pi * (D_pile + d_eff) 
     
     # 1. Ultimate Shear Force ($V_u$)
     V_u_kN = R_max * LF
     V_u_N = V_u_kN * 1000 # Convert to Newtons
     
     # 2. Nominal Concrete Shear Capacity ($V_c$)
-    # ACI 318-19 Eq. 22.6.5.2: $V_c = 0.17 \cdot \sqrt{f'_c} \cdot b_o \cdot d$ ($f'_c$ in MPa, $b_o, d$ in mm, $V_c$ in N)
+    # $V_c = 0.17 \cdot \sqrt{f'_c} \cdot b_o \cdot d$ 
     d_eff_mm = d_eff * 1000 
     b_o_mm = b_o_perimeter * 1000
     
-    # $V_c$ is in Newtons
     V_c_N = 0.17 * np.sqrt(fc_prime) * b_o_mm * d_eff_mm
     
     # 3. Allowable Shear Capacity
@@ -113,7 +109,6 @@ def calculate_As_req(Mu, b, d, fc_prime, fy):
     """
     Calculates the required steel area $A_s$ (mm^2) for a rectangular section 
     given $M_u$ (kN-m), b (mm), d (mm), $f'_c$ (MPa), and $f_y$ (MPa).
-    Uses the ACI simplified quadratic formula method.
     """
     Mu_Nmm = Mu * 1e6 # Convert kN-m to N-mm
     
@@ -122,31 +117,22 @@ def calculate_As_req(Mu, b, d, fc_prime, fy):
 
     phi = PHI_FLEXURE
     
-    # $f'_c$ and $f_y$ are in N/mm^2 (MPa)
     fc_prime_Mpa = fc_prime 
     fy_Mpa = fy 
 
-    # 1. Calculate Required Resistance Factor $R_n$: $R_n = M_u / (\phi \cdot b \cdot d^2)$ in N/mm^2 (MPa)
+    # 1. Calculate Required Resistance Factor $R_n$: $R_n = M_u / (\phi \cdot b \cdot d^2)$
     if b * d**2 == 0:
-        return 99999.0
+        return 99999.0 # Placeholder for failure
         
     Rn = (Mu_Nmm / phi) / (b * d**2)
     
-    # Beta1 (for $f'_c \le 28$ MPa, $\beta_1=0.85$, decreases by 0.05 for every 7MPa increase over 28)
-    if fc_prime_Mpa <= 28:
-        beta1 = 0.85
-    else:
-        beta1 = max(0.85 - 0.05 * (fc_prime_Mpa - 28) / 7.0, 0.65)
-        
-    # Solving for reinforcement ratio $\rho$ using the quadratic formula for ACI $R_n$:
-    # $\rho = (0.85 \cdot f'_c / f_y) \cdot (1 - \sqrt{1 - 2 \cdot R_n / (0.85 \cdot f'_c)})$
-    
+    # Check the term under the square root
     term_under_sqrt = 1 - (2 * Rn) / (0.85 * fc_prime_Mpa)
     
     if term_under_sqrt < 0:
-        # This means the required $R_n$ is too high, indicating insufficient depth/capacity
-        return 99999.0 
+        return 99999.0 # Insufficient depth/capacity
         
+    # Calculate required reinforcement ratio $\rho$
     rho = (0.85 * fc_prime_Mpa / fy_Mpa) * (1 - np.sqrt(term_under_sqrt))
     
     # Required Steel Area ($A_s$) in $mm^2$
@@ -157,7 +143,6 @@ def calculate_As_req(Mu, b, d, fc_prime, fy):
 def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_factor):
     """
     Calculates the required steel area for flexure in the pile cap (simplified).
-    Moment is calculated by summing ultimate pile forces $\times$ distance to centroid (critical section).
     """
     
     if d_eff <= 0:
@@ -170,18 +155,15 @@ def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_fa
     Mu_y_list = [] # Moment about Y-axis (Resisted by steel parallel to X)
     
     for x, y, R_i in reactions:
-        # Use the signed reaction R_i for moment calculation, then take the absolute sum
         R_i_u = R_i * load_factor
         
-        # Moment about X-axis (using y-distance): sum R*y for y > 0
+        # Sum moments from piles contributing to the critical section (e.g., piles past the centroid)
         if y >= 0:
             Mu_x_list.append(R_i_u * y)
         
-        # Moment about Y-axis (using x-distance): sum R*x for x > 0
         if x >= 0:
             Mu_y_list.append(R_i_u * x)
 
-    # Max moment is the largest absolute value (tension or compression side)
     Mu_x = abs(sum(Mu_x_list)) # Total design moment in Y direction (about X-axis)
     Mu_y = abs(sum(Mu_y_list)) # Total design moment in X direction (about Y-axis)
     
@@ -192,13 +174,11 @@ def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_fa
     b_x = Ly * 1000 # Cap width in mm ($L_y$)
     As_x_req = calculate_As_req(Mu_y, b_x, d, fc_prime, fy)
     results['Mu_y'] = Mu_y
-    results['As_x_req'] = As_x_req
-
+    
     # Direction Y Reinforcement (Resists $M_{u,x}$ over cap width $L_x$)
     b_y = Lx * 1000 # Cap width in mm ($L_x$)
     As_y_req = calculate_As_req(Mu_x, b_y, d, fc_prime, fy)
     results['Mu_x'] = Mu_x
-    results['As_y_req'] = As_y_req
 
     # Check for minimum reinforcement requirement (ACI 318-19 9.6.1.1)
     # $\rho_{min} = \max(\frac{0.25 \cdot \sqrt{f'_c}}{f_y}, \frac{1.4}{f_y})$
@@ -214,7 +194,7 @@ def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_fa
     return results, "O.K."
 
 # Create a visual representation of the pile group and the critical pile using Plotly
-def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap):
+def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, H_cap):
     
     # Prepare data for plotting
     data = []
@@ -229,8 +209,6 @@ def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap):
         
         # Scale marker size based on absolute reaction (max size 30, min size 10)
         size = 10 + (abs(R_i) / max_abs_R) * 20 if max_abs_R > 0 else 15
-        
-        # Determine color (Red for compression, Blue for tension/uplift)
         color = 'red' if R_i >= 0 else 'blue'
         
         data.append({
@@ -295,7 +273,7 @@ def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap):
     x_offset_center = (Nx - 1) * Sx / 2.0
     y_offset_center = (Ny - 1) * Sy / 2.0
     
-    # Draw Cap boundary (conceptual - 0.5m edge distance)
+    # Calculate Cap boundary (0.5m edge distance)
     Lx_cap = (Nx - 1) * Sx + 2 * 0.5 
     Ly_cap = (Ny - 1) * Sy + 2 * 0.5
     
@@ -372,6 +350,10 @@ st.divider()
 # 1. Pile Group Analysis
 reactions, R_max, sum_x2, sum_y2 = calculate_pile_reactions(P_net, Mx, My, Nx, Ny, Sx, Sy)
 
+# Estimate Lx and Ly for calculating area (Cap dimensions assumed 0.5m past outermost piles)
+Lx_cap = (Nx - 1) * Sx + 2 * 0.5 
+Ly_cap = (Ny - 1) * Sy + 2 * 0.5
+
 st.header("Calculation Results")
 
 # --- First Column: Pile Reactions ---
@@ -382,15 +364,14 @@ with col_res1:
     
     # Display Group Properties
     st.markdown(f"**Total Piles ($N$):** ${Nx} \\times {Ny} = {Nx * Ny}$")
-    st.markdown(f"**$\sum x^2$ (Pile Group Stiffness):** ${sum_x2:,.2f} \: \mathrm{{m^2}}$")
-    st.markdown(f"**$\sum y^2$ (Pile Group Stiffness):** ${sum_y2:,.2f} \: \mathrm{{m^2}}$")
+    st.markdown(f"**Cap Dimensions ($L_x \times L_y$):** ${Lx_cap:,.2f} \mathrm{{m}} \\times {Ly_cap:,.2f} \mathrm{{m}}$")
     
     # Display Max Reaction
     if R_max > 0:
         st.metric(
             label="Maximum Vertical Pile Reaction $R_{max}$",
             value=f"{R_max:,.2f} kN",
-            help="This is the maximum load that any individual pile must resist, used for sizing the piles and the pile cap shear check."
+            help="This is the maximum load that any individual pile must resist."
         )
     else:
         st.info("Enter pile geometry and loads to calculate reactions.")
@@ -430,7 +411,7 @@ with col_res2:
         st.metric(
             label="Ultimate Shear Force $V_u$",
             value=f"{V_u:,.2f} kN",
-            help=f"$V_u = R_{{max}} \\times LF = {R_max:,.2f} \mathrm{{kN}} \\times {load_factor}$"
+            help=f"$V_u = R_{{max}} \\times LF$"
         )
         
         st.metric(
@@ -454,11 +435,7 @@ with col_res2:
 # --- Flexural Check Section ---
 st.divider()
 st.subheader("Flexural Reinforcement Design (Simplified ACI Check)")
-st.caption("Simplified check: Design moment $M_u$ is calculated by summing ultimate pile forces multiplied by the distance to the cap centroid. $\phi=0.9$.")
-
-# Estimate Lx and Ly for calculating area (Cap dimensions assumed 0.5m past outermost piles)
-Lx_cap = (Nx - 1) * Sx + 2 * 0.5 
-Ly_cap = (Ny - 1) * Sy + 2 * 0.5
+st.caption("Design moment $M_u$ is calculated by summing ultimate pile forces multiplied by the distance to the cap centroid. $\phi=0.9$.")
 
 # Perform flexural check
 if R_max > 0 and H_cap > 0 and fy > 0:
@@ -470,7 +447,7 @@ if R_max > 0 and H_cap > 0 and fy > 0:
     flex_col1, flex_col2 = st.columns(2)
     
     with flex_col1:
-        st.markdown(f"#### X-Direction Reinf. (Perpendicular to Y-axis)")
+        st.markdown(f"#### X-Direction Reinf. (Resists $M_{{u,y}}$)")
         st.markdown(f"**Cap Width $L_y$ (b):** {Ly_cap:,.2f} m")
         st.metric(
             label="Design Moment $M_{u,y}$ (about Y-axis)", 
@@ -482,11 +459,11 @@ if R_max > 0 and H_cap > 0 and fy > 0:
              st.metric(
                 label="Required Steel Area $A_{s,x}$", 
                 value=f"{flexural_results['As_x_req']:,.0f} $mm^2$",
-                help="Includes minimum reinforcement requirements (ACI 318-19 9.6.1.1)"
+                help="Includes minimum reinforcement requirements ($\rho_{min}$)"
              )
 
     with flex_col2:
-        st.markdown(f"#### Y-Direction Reinf. (Perpendicular to X-axis)")
+        st.markdown(f"#### Y-Direction Reinf. (Resists $M_{{u,x}}$)")
         st.markdown(f"**Cap Width $L_x$ (b):** {Lx_cap:,.2f} m")
         st.metric(
             label="Design Moment $M_{u,x}$ (about X-axis)", 
@@ -498,7 +475,7 @@ if R_max > 0 and H_cap > 0 and fy > 0:
             st.metric(
                 label="Required Steel Area $A_{s,y}$", 
                 value=f"{flexural_results['As_y_req']:,.0f} $mm^2$",
-                help="Includes minimum reinforcement requirements (ACI 318-19 9.6.1.1)"
+                help="Includes minimum reinforcement requirements ($\rho_{min}$)"
             )
 
 else:
@@ -507,13 +484,12 @@ else:
 # --- Visualization (Plotly Plan View) ---
 st.divider()
 st.header("Pile Group Plan View (Plotly Interactive)")
-st.caption(f"Piles are colored/sized by reaction magnitude (Red = Compression, Blue = Tension).")
-
-# Store H_cap in session state so draw_piles can access d_eff for plotting
-st.session_state['H_cap'] = H_cap
+st.caption(f"Piles are colored/sized by reaction magnitude (Red = Compression, Blue = Tension). The dashed gray line shows the approximate cap edge (0.5m overhang).")
 
 if reactions:
     try:
-        draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap)
+        # Pass necessary arguments to draw_piles_plotly
+        draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, H_cap)
     except Exception as e:
+        # Fallback for plotting errors
         st.warning("Could not generate interactive plot. Ensure all inputs are valid.")
