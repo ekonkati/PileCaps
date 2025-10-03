@@ -11,4 +11,5 @@ fpdf2
 plotly
 ezdxf
 scipy
+flake8
 
