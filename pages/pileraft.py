@@ -12,7 +12,7 @@ def calculate_pile_reactions(P, Mx, My, Nx, Ny, Sx, Sy):
     """
     Calculates the vertical reaction force for each pile in a rigid pile cap 
     using the elastic method.
-    R_i = P/N +/- (My * xi / sum(x^2)) +/- (Mx * yi / sum(y^2))
+    $R_i = P/N \pm (M_y \cdot x_i / \sum x^2) \pm (M_x \cdot y_i / \sum y^2)$
 
     Args:
         P (float): Total vertical load (kN).
@@ -33,18 +33,18 @@ def calculate_pile_reactions(P, Mx, My, Nx, Ny, Sx, Sy):
     pile_coords = []
     
     # Calculate coordinate offsets from centroid
-    # X-coordinates range from -(Nx-1)/2 * Sx to (Nx-1)/2 * Sx
+    # X-coordinates range from $-(N_x-1)/2 \cdot S_x$ to $(N_x-1)/2 \cdot S_x$
     x_offset = (Nx - 1) * Sx / 2.0
     for i in range(Nx):
         x = i * Sx - x_offset
         
-        # Y-coordinates range from -(Ny-1)/2 * Sy to (Ny-1)/2 * Sy
+        # Y-coordinates range from $-(N_y-1)/2 \cdot S_y$ to $(N_y-1)/2 \cdot S_y$
         y_offset = (Ny - 1) * Sy / 2.0
         for j in range(Ny):
             y = j * Sy - y_offset
             pile_coords.append((x, y))
 
-    # Calculate sum of squares (sum_x2 and sum_y2)
+    # Calculate sum of squares ($\sum x^2$ and $\sum y^2$)
     x_coords = np.array([coord[0] for coord in pile_coords])
     y_coords = np.array([coord[1] for coord in pile_coords])
     
@@ -58,11 +58,11 @@ def calculate_pile_reactions(P, Mx, My, Nx, Ny, Sx, Sy):
     for x, y in pile_coords:
         R_vertical = P / N
         
-        # Moment My causes stress in the x-direction (M*x/Sum(x^2))
+        # Moment My causes stress in the x-direction ($M \cdot x / \sum x^2$)
         if sum_x2 != 0:
             R_vertical += (My * x) / sum_x2
         
-        # Moment Mx causes stress in the y-direction (M*y/Sum(y^2))
+        # Moment Mx causes stress in the y-direction ($M \cdot y / \sum y^2$)
         if sum_y2 != 0:
             R_vertical += (Mx * y) / sum_y2
 
@@ -84,21 +84,22 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
     d_eff = H_cap - 0.15 
     
     if d_eff <= 0:
+        # Prevent division by zero or negative dimensions
         return 0, 0, d_eff, "Depth too small for effective cover.", 0
         
-    # Critical section for two-way shear is at d_eff/2 from the pile face
-    b_o_perimeter = np.pi * (D_pile + d_eff) # Circumference of a circle with radius (D_pile/2 + d_eff/2)
+    # Critical section for two-way shear is at $d_{eff}/2$ from the pile face
+    b_o_perimeter = np.pi * (D_pile + d_eff) # Circumference of a circle with radius $(D_{pile}/2 + d_{eff}/2)$
     
-    # 1. Ultimate Shear Force (Vu)
+    # 1. Ultimate Shear Force ($V_u$)
     V_u_kN = R_max * LF
     V_u_N = V_u_kN * 1000 # Convert to Newtons
     
-    # 2. Nominal Concrete Shear Capacity (Vc)
-    # ACI 318-19 Eq. 22.6.5.2: Vc = 0.17 * sqrt(f'c) * bo * d (f'c in MPa, bo, d in mm, Vc in N)
+    # 2. Nominal Concrete Shear Capacity ($V_c$)
+    # ACI 318-19 Eq. 22.6.5.2: $V_c = 0.17 \cdot \sqrt{f'_c} \cdot b_o \cdot d$ ($f'_c$ in MPa, $b_o, d$ in mm, $V_c$ in N)
     d_eff_mm = d_eff * 1000 
     b_o_mm = b_o_perimeter * 1000
     
-    # Vc is in Newtons
+    # $V_c$ is in Newtons
     V_c_N = 0.17 * np.sqrt(fc_prime) * b_o_mm * d_eff_mm
     
     # 3. Allowable Shear Capacity
@@ -110,8 +111,8 @@ def check_punching_shear(R_max, H_cap, D_pile, fc_prime, LF=1.5):
 
 def calculate_As_req(Mu, b, d, fc_prime, fy):
     """
-    Calculates the required steel area As (mm^2) for a rectangular section 
-    given Mu (kN-m), b (mm), d (mm), fc_prime (MPa), and fy (MPa).
+    Calculates the required steel area $A_s$ (mm^2) for a rectangular section 
+    given $M_u$ (kN-m), b (mm), d (mm), $f'_c$ (MPa), and $f_y$ (MPa).
     Uses the ACI simplified quadratic formula method.
     """
     Mu_Nmm = Mu * 1e6 # Convert kN-m to N-mm
@@ -121,38 +122,34 @@ def calculate_As_req(Mu, b, d, fc_prime, fy):
 
     phi = PHI_FLEXURE
     
-    # Convert f'c and fy to N/mm^2 (which is MPa)
+    # $f'_c$ and $f_y$ are in N/mm^2 (MPa)
     fc_prime_Mpa = fc_prime 
     fy_Mpa = fy 
 
-    # 1. Calculate Required Resistance Factor Rn: Rn = Mu / (phi * b * d^2) in N/mm^2 (MPa)
-    # Ensure denominator is not zero
+    # 1. Calculate Required Resistance Factor $R_n$: $R_n = M_u / (\phi \cdot b \cdot d^2)$ in N/mm^2 (MPa)
     if b * d**2 == 0:
         return 99999.0
         
     Rn = (Mu_Nmm / phi) / (b * d**2)
     
-    # 2. Check maximum steel ratio (A simplified check using the balanced condition)
-    # Beta1 (for f'c <= 28 MPa, beta1=0.85, decreases by 0.05 for every 7MPa increase over 28)
+    # Beta1 (for $f'_c \le 28$ MPa, $\beta_1=0.85$, decreases by 0.05 for every 7MPa increase over 28)
     if fc_prime_Mpa <= 28:
         beta1 = 0.85
     else:
         beta1 = max(0.85 - 0.05 * (fc_prime_Mpa - 28) / 7.0, 0.65)
         
-    # Max tensile strain of 0.005 for flexure is simplified to rho_max
+    # Solving for reinforcement ratio $\rho$ using the quadratic formula for ACI $R_n$:
+    # $\rho = (0.85 \cdot f'_c / f_y) \cdot (1 - \sqrt{1 - 2 \cdot R_n / (0.85 \cdot f'_c)})$
     
-    # Solving for reinforcement ratio rho using the quadratic formula for ACI Rn:
-    # rho = (0.85 * f'c / fy) * (1 - sqrt(1 - 2 * Rn / (0.85 * f'c)))
-    
-    # Check the term under the square root
     term_under_sqrt = 1 - (2 * Rn) / (0.85 * fc_prime_Mpa)
     
     if term_under_sqrt < 0:
-        return 99999.0 # Rebar ratio too high / Depth insufficient
+        # This means the required $R_n$ is too high, indicating insufficient depth/capacity
+        return 99999.0 
         
     rho = (0.85 * fc_prime_Mpa / fy_Mpa) * (1 - np.sqrt(term_under_sqrt))
     
-    # Required Steel Area (As) in mm^2
+    # Required Steel Area ($A_s$) in $mm^2$
     As_req_mm2 = rho * b * d
     
     return As_req_mm2
@@ -160,7 +157,7 @@ def calculate_As_req(Mu, b, d, fc_prime, fy):
 def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_factor):
     """
     Calculates the required steel area for flexure in the pile cap (simplified).
-    Moment is calculated by summing ultimate pile forces * distance to centroid (critical section).
+    Moment is calculated by summing ultimate pile forces $\times$ distance to centroid (critical section).
     """
     
     if d_eff <= 0:
@@ -168,14 +165,12 @@ def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_fa
 
     results = {}
     
-    # 1. Calculate Design Moments (Mu)
+    # 1. Calculate Design Moments ($M_u$)
     Mu_x_list = [] # Moment about X-axis (Resisted by steel parallel to Y)
     Mu_y_list = [] # Moment about Y-axis (Resisted by steel parallel to X)
     
     for x, y, R_i in reactions:
-        # We use the absolute value of the reaction for flexure since we are checking the largest moment.
-        # R_i_u = abs(R_i) * load_factor # Using abs() for max design moment calculation
-        # A more conservative approach is to use R_i (signed) and check both max positive and max negative moments
+        # Use the signed reaction R_i for moment calculation, then take the absolute sum
         R_i_u = R_i * load_factor
         
         # Moment about X-axis (using y-distance): sum R*y for y > 0
@@ -190,27 +185,28 @@ def check_flexural_reinforcement(reactions, d_eff, Lx, Ly, fc_prime, fy, load_fa
     Mu_x = abs(sum(Mu_x_list)) # Total design moment in Y direction (about X-axis)
     Mu_y = abs(sum(Mu_y_list)) # Total design moment in X direction (about Y-axis)
     
-    # d and b are in mm for the helper function
+    # d and b are converted to mm for the helper function
     d = d_eff * 1000 
     
-    # Direction X Reinforcement (Resists Mu_y over cap width Ly)
-    b_x = Ly * 1000 # Cap width in mm (Ly)
+    # Direction X Reinforcement (Resists $M_{u,y}$ over cap width $L_y$)
+    b_x = Ly * 1000 # Cap width in mm ($L_y$)
     As_x_req = calculate_As_req(Mu_y, b_x, d, fc_prime, fy)
     results['Mu_y'] = Mu_y
     results['As_x_req'] = As_x_req
 
-    # Direction Y Reinforcement (Resists Mu_x over cap width Lx)
-    b_y = Lx * 1000 # Cap width in mm (Lx)
+    # Direction Y Reinforcement (Resists $M_{u,x}$ over cap width $L_x$)
+    b_y = Lx * 1000 # Cap width in mm ($L_x$)
     As_y_req = calculate_As_req(Mu_x, b_y, d, fc_prime, fy)
     results['Mu_x'] = Mu_x
     results['As_y_req'] = As_y_req
 
     # Check for minimum reinforcement requirement (ACI 318-19 9.6.1.1)
+    # $\rho_{min} = \max(\frac{0.25 \cdot \sqrt{f'_c}}{f_y}, \frac{1.4}{f_y})$
     rho_min_factor = max(0.25 * np.sqrt(fc_prime), 1.4)
     rho_min = rho_min_factor / fy
     
-    As_min_x = rho_min * b_x * d / 1000
-    As_min_y = rho_min * b_y * d / 1000 
+    As_min_x = rho_min * b_x * d 
+    As_min_y = rho_min * b_y * d 
 
     results['As_x_req'] = max(As_x_req, As_min_x)
     results['As_y_req'] = max(As_y_req, As_min_y)
@@ -299,15 +295,19 @@ def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap):
     x_offset_center = (Nx - 1) * Sx / 2.0
     y_offset_center = (Ny - 1) * Sy / 2.0
     
-    # Draw Cap boundary (conceptual)
+    # Draw Cap boundary (conceptual - 0.5m edge distance)
     Lx_cap = (Nx - 1) * Sx + 2 * 0.5 
     Ly_cap = (Ny - 1) * Sy + 2 * 0.5
+    
+    # Calculate corners of the cap for drawing the boundary rectangle
+    x_min = -x_offset_center - 0.5
+    y_min = -y_offset_center - 0.5
     
     fig.add_shape(
         type="rect",
         xref="x", yref="y",
-        x0=-x_offset_center - 0.5, y0=-y_offset_center - 0.5,
-        x1=-x_offset_center - 0.5 + Lx_cap, y1=-y_offset_center - 0.5 + Ly_cap,
+        x0=x_min, y0=y_min,
+        x1=x_min + Lx_cap, y1=y_min + Ly_cap,
         line=dict(color="gray", width=2, dash="dash"),
         fillcolor='rgba(0, 0, 0, 0)',
         name='Cap Boundary'
@@ -318,8 +318,8 @@ def draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap):
         title='Pile Group Plan View (Size and Color by Reaction)',
         xaxis_title="X-direction (m)",
         yaxis_title="Y-direction (m)",
-        xaxis_range=[-x_offset_center - 0.75, x_offset_center + 0.75],
-        yaxis_range=[-y_offset_center - 0.75, y_offset_center + 0.75],
+        xaxis_range=[x_min - 0.2, x_min + Lx_cap + 0.2],
+        yaxis_range=[y_min - 0.2, y_min + Ly_cap + 0.2],
         xaxis=dict(zeroline=True, zerolinecolor='black', zerolinewidth=1),
         yaxis=dict(zeroline=True, zerolinecolor='black', zerolinewidth=1),
         plot_bgcolor='white',
@@ -436,7 +436,7 @@ with col_res2:
         st.metric(
             label="Allowable Shear Capacity $\phi V_c$",
             value=f"{V_c_allow:,.2f} kN",
-            help="Based on ACI 318-19 Eq. 22.6.5.2 (simplified) for Two-way Shear with $\\phi=0.75$."
+            help="Based on ACI 318-19 Eq. 22.6.5.2 (simplified) for Two-way Shear with $\phi=0.75$."
         )
 
         st.markdown("---")
@@ -516,5 +516,4 @@ if reactions:
     try:
         draw_piles_plotly(reactions, Nx, Ny, Sx, Sy, Dp, R_max, H_cap)
     except Exception as e:
-        # st.warning(f"Could not generate Plotly chart. Error: {e}") # Suppressing detailed internal error
         st.warning("Could not generate interactive plot. Ensure all inputs are valid.")
