@@ -8,12 +8,15 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
     """
     Performs simplified isolated footing design calculations.
     - Assumes square footing for simplicity in initial sizing.
-    - Does NOT include full shear and moment depth checks.
     """
     try:
         # 1. Calculate Required Area
         P_service = Pu / 1.5  # Approximate service load (assuming 1.5 load factor)
-        P_eff = P_service + gamma_c * 1 * 1 * 1  # Add self-weight (approx 10% or assume 1m deep)
+        # Assume 0.5m depth for initial self-weight estimation
+        D_assumed = 0.5 
+        W_self = gamma_c * D_assumed * 1.1 # 10% tolerance for extra weight
+        P_eff = P_service + W_self * (bc * dc) # Simplified self-weight, to be updated later
+
         A_req = P_eff / SBC
         
         # Assume square footing
@@ -23,52 +26,54 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
         
         A_actual = L * B
         
-        # Calculate Max Soil Pressure (q_max) for checking
-        # Check eccentricity
-        e_x = Mucx / P_service
-        e_z = Mucz / P_service
+        # 2. Check Soil Pressure and Eccentricity
+        e_x = abs(Mucx / P_service)
+        e_z = abs(Mucz / P_service)
         
-        # Core check: is it outside the middle third (or middle sixth for biaxial)?
         if e_x > L / 6 or e_z > B / 6:
-            # Simplified for safety: If outside middle sixth, assume failure mode / uplift for this code
-            # Note: A real design would calculate the pressure distribution for partial bearing.
-             q_max = 9999.0 # Placeholder for a very large pressure indicating failure/uplift
+             # Case of uplift / outside middle third (or middle sixth for biaxial)
+             q_max = 9999.0 # Sentinel value for failure
+             pressure_status = "FAILED (Uplift/High Eccentricity)"
         else:
              # Pressure calculation (simplified by assuming service load P_service)
              q_max = P_service / A_actual + (6 * Mucx) / (L * B**2) + (6 * Mucz) / (B * L**2)
+             pressure_status = "OK"
         
-        q_net_u = Pu / A_actual # Simplified net upward pressure for design
+        # Factored net upward pressure for design
+        q_net_u = Pu / A_actual
         
-        # 2. Approximate Depth 'D' (Initial guess based on punching shear or thumb rule)
-        D_trial = B / 4
+        # 3. Approximate Depth 'D' (Initial guess based on B/4 to B/3)
+        D_trial = B / 3.5
+        d = D_trial - 0.075 # 75mm effective cover (0.075m)
         
-        # 3. Design Bending Moment (Simplified, considering critical section at column face)
+        # 4. Design Bending Moment (Critical section at column face)
         a_x = (L - bc) / 2
-        M_u_x = q_net_u * B * a_x**2 / 2
+        M_u_x = q_net_u * B * a_x**2 / 2 # kNm
         
-        # 4. Required Steel (Ast) - Simplified
-        # Assuming d = D_trial - cover
-        d = D_trial - 0.075 # 75mm cover
+        # 5. Required Steel (Ast) per meter width (B=1m)
+        b_m = 1000 # 1 meter width in mm
+        d_m = d * 1000 # effective depth in mm
         
-        # Limit moment calculation (from IS 456)
-        if fy == 415:
-            R_lim = 0.138 * fc * (d*1000)**2 * 1e-6 # Convert to kNm
-        elif fy == 500:
-            R_lim = 0.133 * fc * (d*1000)**2 * 1e-6 # Convert to kNm
-        else: # assuming 250
-            R_lim = 0.148 * fc * (d*1000)**2 * 1e-6 # Convert to kNm
-            
-        if M_u_x > R_lim * B:
-             # This checks if the moment per meter exceeds the section capacity
-             pass # Let the user know, but don't crash
+        # Check Mu Limit (for balanced/over-reinforced check)
+        # Mu_limit = 0.36*fck*xumax/d*(d - 0.42*xumax) * b
+        # For Fe 415: xumax/d = 0.48
+        # Mu_lim = 0.138 * fc * b_m * d_m**2 / 10**6 # kNm/m
         
-        # Simplified Ast calculation (T-beam or uncoupled section assumed)
-        # Ast_req in mm2 per meter width (B=1m)
-        Ast_req = (0.5 * fc / fy) * (1 - np.sqrt(1 - (4.6 * M_u_x * 10**6) / (fc * B * (d*1000)**2))) * B * d * 1000 # Corrected units
-        
-        # Ast_min (0.12% for Fe415/500, 0.15% for Fe250)
-        Ast_min = 0.0012 * 1 * (d * 1000) * 1000 # mm2 per meter width
-        Ast_x = max(Ast_req * 1000, Ast_min) # Convert from m2 to mm2 and check min (was incorrectly converting B*d to m2)
+        # The term inside the square root (R_term)
+        R_term = (4.6 * M_u_x * 10**6) / (fc * b_m * d_m**2)
+
+        if R_term >= 1.0:
+             # Moment capacity exceeded, depth is too shallow
+             Ast_x = 99999.0 # Sentinel value for insufficient depth
+             steel_status = "FAILED (Depth Insufficient)"
+        else:
+             # Calculate Ast (mm2/m)
+             Ast_req_m2 = (0.5 * fc / fy) * (1 - np.sqrt(1 - R_term)) * b_m * d_m
+             
+             # Ast_min (0.12% for Fe415/500)
+             Ast_min_m2 = 0.0012 * b_m * d_m
+             Ast_x = max(Ast_req_m2, Ast_min_m2)
+             steel_status = "OK"
 
         # Simplified results for demonstration
         results = {
@@ -77,14 +82,17 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
             "Required Area [m²]": A_req,
             "Actual Area [m²]": A_actual,
             "Max Soil Pressure (q_max) [kN/m²]": q_max,
+            "Pressure Status": pressure_status,
             "Trial Depth (D) [m]": D_trial,
             "Design Moment (Mu_x) [kNm]": M_u_x,
             "Req. Steel (Ast_x) [mm²/m]": Ast_x,
+            "Steel Status": steel_status
         }
         return results
+        
     except Exception as e:
         # Return the error message explicitly
-        return {"Error": f"Calculation failed: {str(e)}"}
+        return {"Error": f"Calculation failed during general design step. Detail: {str(e)}"}
 
 # --- PLOTLY VISUALIZATIONS (Unchanged) ---
 
@@ -194,7 +202,7 @@ st.set_page_config(layout="wide")
 st.title("🏗️ Isolated Foundation Design (IS Code Based)")
 st.caption("Replicating Functionality from 'ISLOATED FOUNDATION DESIGN FOR ALL NODES.xlsm'")
 
-st.warning("⚠️ **Disclaimer:** This app uses standard IS code logic as a template. To fully replicate your Excel file's functionality, please ensure the parameters and calculation formulas are consistent with those in your original spreadsheet.")
+st.warning("⚠️ **Disclaimer:** This app uses standard IS code logic as a template. To fully replicate your Excel file's functionality, you must ensure the parameters and calculation formulas are consistent with your original spreadsheet.")
 
 st.sidebar.header("Design Inputs")
 
@@ -222,11 +230,12 @@ if st.sidebar.button("Run Design"):
     # Perform Design
     results = design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc)
     
-    # --- ERROR HANDLING FIX ---
+    # --- ERROR HANDLING BLOCK ---
     if "Error" in results:
         st.error(f"Design Calculation Failed! Check inputs or logic. Details: {results['Error']}")
-        # Stop execution here if there's an error
+        # The app stops displaying results here if there's a Python error
     else:
+        # If no "Error" key, we proceed safely
         L_final = results['Footing Length (L) [m]']
         B_final = results['Footing Width (B) [m]']
         D_trial = results['Trial Depth (D) [m]']
@@ -235,41 +244,59 @@ if st.sidebar.button("Run Design"):
         
         with col1:
             st.header("Design Results Summary")
-            # Filter the dictionary to remove temporary calculation keys for clean display
-            display_results = {k: v for k, v in results.items()}
+            # Remove status/sentinel keys for cleaner display
+            display_results = {k: v for k, v in results.items() if not k.endswith("Status")}
             df = pd.DataFrame(display_results.items(), columns=['Parameter', 'Value'])
             st.dataframe(df, use_container_width=True)
 
         with col2:
-            st.header("Check against SBC")
+            st.header("Design Checks")
             
-            # Use the retrieved value, now safe because we checked for 'Error'
+            # 1. Soil Pressure Check
             q_max_val = results['Max Soil Pressure (q_max)']
+            pressure_status = results['Pressure Status']
+            st.subheader("1. Safe Bearing Capacity (SBC) Check")
             
-            if q_max_val == 9999.0:
-                 st.error("Soil Pressure Check **FAILED (Uplift/Outside Middle Sixth)**. The foundation is undersized for the applied moment. Increase size or reduce eccentricity.")
+            if pressure_status.startswith("FAILED"):
+                 st.error(f"Pressure Check: **{pressure_status}**. The foundation is undersized for the applied moment.")
             elif q_max_val < SBC * 1.1: 
                  st.success(f"Maximum Pressure: {q_max_val:.2f} kN/m² < SBC: {SBC:.2f} kN/m² **(OK)**")
             else:
                  st.error(f"Maximum Pressure: {q_max_val:.2f} kN/m² > SBC: {SBC:.2f} kN/m² **(FAIL)**. Increase Footing Size.")
+                 
+            # 2. Steel/Depth Check
+            st.subheader("2. Depth and Steel Check")
+            steel_status = results['Steel Status']
             
-            st.subheader("Key Design Output")
+            if steel_status.startswith("FAILED"):
+                st.error(f"Steel Design: **{steel_status}**. The Trial Depth ({D_trial:.2f}m) is too shallow for the bending moment. **Increase depth (D)**.")
+                req_steel_text = "N/A (Depth Fail)"
+            else:
+                st.success("Bending Depth and Steel calculation **(OK)**.")
+                req_steel_text = f"{results['Req. Steel (Ast_x)']:.2f} mm²/m width"
+
+
+            st.subheader("Key Output")
             st.metric("Footing Size (L x B)", f"{L_final:.2f}m x {B_final:.2f}m")
-            st.metric("Required Steel (Ast, X-Dir)", f"{results['Req. Steel (Ast_x)']:.2f} mm²/m width")
+            st.metric("Required Steel (Ast, X-Dir)", req_steel_text)
 
 
         st.markdown("---")
         st.header("Design Sketches")
         
-        sketch_col1, sketch_col2 = st.columns(2)
-        
-        with sketch_col1:
-             # 3D Footing Sketch (Plotly)
-             st.plotly_chart(plot_footing_3d(L_final, B_final, D_trial, bc, dc), use_container_width=True)
-             
-        with sketch_col2:
-            # Footing Plan Sketch (Plotly)
-            st.plotly_chart(plot_footing_plan(L_final, B_final, bc, dc), use_container_width=True)
+        # Display sketches only if design size is reasonable (not failed with 9999)
+        if L_final < 100 and B_final < 100:
+            sketch_col1, sketch_col2 = st.columns(2)
+            
+            with sketch_col1:
+                 # 3D Footing Sketch (Plotly)
+                 st.plotly_chart(plot_footing_3d(L_final, B_final, D_trial, bc, dc), use_container_width=True)
+                 
+            with sketch_col2:
+                # Footing Plan Sketch (Plotly)
+                st.plotly_chart(plot_footing_plan(L_final, B_final, bc, dc), use_container_width=True)
+        else:
+             st.error("Footing size is unrealistically large. Check inputs or design logic.")
              
 else:
     st.info("Enter design parameters in the sidebar and click 'Run Design' to generate results and sketches.")
