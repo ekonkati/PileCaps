@@ -14,10 +14,11 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
         P_service = Pu / 1.5  # Approximate service load (assuming 1.5 load factor)
         # Assume 0.5m depth for initial self-weight estimation
         D_assumed = 0.5 
-        W_self = gamma_c * D_assumed * 1.1 # 10% tolerance for extra weight
-        P_eff = P_service + W_self * (bc * dc) # Simplified self-weight, to be updated later
-
-        A_req = P_eff / SBC
+        W_self = gamma_c * D_assumed # Self weight per m² (assuming 0.5m depth)
+        
+        # Estimate total area required
+        A_req = P_service / (SBC - W_self)
+        if A_req <= 0: A_req = (P_service / SBC) * 1.2 # Fallback
         
         # Assume square footing
         B_req = np.sqrt(A_req)
@@ -35,16 +36,19 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
              q_max = 9999.0 # Sentinel value for failure
              pressure_status = "FAILED (Uplift/High Eccentricity)"
         else:
-             # Pressure calculation (simplified by assuming service load P_service)
-             q_max = P_service / A_actual + (6 * Mucx) / (L * B**2) + (6 * Mucz) / (B * L**2)
+             # Pressure calculation (P_service includes self weight calculation refinement)
+             W_footing = gamma_c * L * B * D_assumed # Rough self weight estimate
+             P_total_service = P_service + W_footing
+             
+             q_max = P_total_service / A_actual + (6 * Mucx) / (L * B**2) + (6 * Mucz) / (B * L**2)
              pressure_status = "OK"
         
         # Factored net upward pressure for design
         q_net_u = Pu / A_actual
         
-        # 3. Approximate Depth 'D' (Initial guess based on B/4 to B/3)
+        # 3. Approximate Depth 'D' (Initial guess based on B/3.5)
         D_trial = B / 3.5
-        d = D_trial - 0.075 # 75mm effective cover (0.075m)
+        d = D_trial - 0.075 # effective depth (m)
         
         # 4. Design Bending Moment (Critical section at column face)
         a_x = (L - bc) / 2
@@ -54,20 +58,16 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
         b_m = 1000 # 1 meter width in mm
         d_m = d * 1000 # effective depth in mm
         
-        # Check Mu Limit (for balanced/over-reinforced check)
-        # Mu_limit = 0.36*fck*xumax/d*(d - 0.42*xumax) * b
-        # For Fe 415: xumax/d = 0.48
-        # Mu_lim = 0.138 * fc * b_m * d_m**2 / 10**6 # kNm/m
-        
         # The term inside the square root (R_term)
         R_term = (4.6 * M_u_x * 10**6) / (fc * b_m * d_m**2)
 
-        if R_term >= 1.0:
+        if R_term >= 1.0 or R_term < 0:
              # Moment capacity exceeded, depth is too shallow
              Ast_x = 99999.0 # Sentinel value for insufficient depth
              steel_status = "FAILED (Depth Insufficient)"
         else:
              # Calculate Ast (mm2/m)
+             # Equation for Ast from IS 456, solving quadratic equation
              Ast_req_m2 = (0.5 * fc / fy) * (1 - np.sqrt(1 - R_term)) * b_m * d_m
              
              # Ast_min (0.12% for Fe415/500)
@@ -75,17 +75,17 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
              Ast_x = max(Ast_req_m2, Ast_min_m2)
              steel_status = "OK"
 
-        # Simplified results for demonstration
+        # RESULTS DICTIONARY (KEYS STANDARDIZED)
         results = {
             "Footing Length (L) [m]": L,
             "Footing Width (B) [m]": B,
             "Required Area [m²]": A_req,
             "Actual Area [m²]": A_actual,
-            "Max Soil Pressure (q_max) [kN/m²]": q_max,
+            "Max Soil Pressure (q_max)": q_max, # KEY FIXED
             "Pressure Status": pressure_status,
             "Trial Depth (D) [m]": D_trial,
             "Design Moment (Mu_x) [kNm]": M_u_x,
-            "Req. Steel (Ast_x) [mm²/m]": Ast_x,
+            "Req. Steel (Ast_x)": Ast_x, # KEY FIXED
             "Steel Status": steel_status
         }
         return results
@@ -98,7 +98,7 @@ def design_isolated_footing(Pu, Mucx, Mucz, fc, fy, SBC, gamma_c, bc, dc):
 
 def plot_footing_3d(L, B, D, bc, dc):
     """Generates an interactive 3D plot of the column and footing."""
-    
+    # ... (Plotly code remains the same)
     # 1. Footing (Base)
     footing = go.Mesh3d(
         x=[0, L, L, 0, 0, L, L, 0],
@@ -244,9 +244,17 @@ if st.sidebar.button("Run Design"):
         
         with col1:
             st.header("Design Results Summary")
-            # Remove status/sentinel keys for cleaner display
-            display_results = {k: v for k, v in results.items() if not k.endswith("Status")}
-            df = pd.DataFrame(display_results.items(), columns=['Parameter', 'Value'])
+            # Create a dictionary for clean display with units added back
+            display_data = {
+                "Footing Size (L x B)": f"{L_final:.2f}m x {B_final:.2f}m",
+                "Required Area": f"{results['Required Area [m²]']:.2f} m²",
+                "Actual Area": f"{results['Actual Area [m²]']:.2f} m²",
+                "Trial Depth (D)": f"{D_trial:.3f} m",
+                "Design Moment (Mu_x)": f"{results['Design Moment (Mu_x) [kNm]']:.2f} kNm",
+                "Max Soil Pressure": f"{results['Max Soil Pressure (q_max)']:.2f} kN/m²",
+                "Required Steel (Ast, X)": f"{results['Req. Steel (Ast_x)']:.2f} mm²/m"
+            }
+            df = pd.DataFrame(display_data.items(), columns=['Parameter', 'Value'])
             st.dataframe(df, use_container_width=True)
 
         with col2:
@@ -267,13 +275,14 @@ if st.sidebar.button("Run Design"):
             # 2. Steel/Depth Check
             st.subheader("2. Depth and Steel Check")
             steel_status = results['Steel Status']
+            req_steel = results['Req. Steel (Ast_x)']
             
             if steel_status.startswith("FAILED"):
                 st.error(f"Steel Design: **{steel_status}**. The Trial Depth ({D_trial:.2f}m) is too shallow for the bending moment. **Increase depth (D)**.")
                 req_steel_text = "N/A (Depth Fail)"
             else:
                 st.success("Bending Depth and Steel calculation **(OK)**.")
-                req_steel_text = f"{results['Req. Steel (Ast_x)']:.2f} mm²/m width"
+                req_steel_text = f"{req_steel:.2f} mm²/m width"
 
 
             st.subheader("Key Output")
