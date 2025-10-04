@@ -6,7 +6,6 @@ import subprocess
 import sys
 
 # Save the streamlit code to a file first
-streamlit_code = '''
 import streamlit as st
 import pandas as pd
 import numpy as np
